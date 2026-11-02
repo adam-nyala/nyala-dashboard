@@ -278,13 +278,23 @@ async function sb(method, path, body) {
   return t?JSON.parse(t):[];
 }
 async function sbAuth(method, path, body) {
-  const r = await fetch(`${SUPABASE_URL}/auth/v1/${path}`, {
-    method,
-    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = await r.json();
-  if (data.error) throw new Error(data.error.message || data.error);
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) throw new Error("The dashboard isn't connected to Supabase: VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY are missing in Vercel. Add them, then redeploy.");
+  let r;
+  try {
+    r = await fetch(`${SUPABASE_URL}/auth/v1/${path}`, {
+      method,
+      headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) { throw new Error(`Couldn't reach Supabase at ${SUPABASE_URL} — check VITE_SUPABASE_URL in Vercel.`); }
+  const data = await r.json().catch(() => ({}));
+  // Supabase Auth returns errors in several shapes ({error, error_description},
+  // {code, error_code, msg}, {message}) — and often with no `error` field at
+  // all, so check the HTTP status, not just data.error.
+  if (!r.ok || data.error || data.error_code) {
+    const msg = data.error_description || data.msg || data.message || (data.error && (data.error.message || data.error)) || `HTTP ${r.status}`;
+    throw new Error(/invalid api key/i.test(msg) ? "Invalid API key — VITE_SUPABASE_ANON_KEY in Vercel doesn't match this Supabase project." : msg);
+  }
   return data;
 }
 const DARK_THEME = {
@@ -14905,7 +14915,7 @@ function Team({currentUser}) {
 }
 function AuthScreen({onAuth}) {
   const [email,setEmail]=useState(""); const [password,setPassword]=useState(""); const [error,setError]=useState(""); const [loading,setLoading]=useState(false);
-  async function signIn(e){e.preventDefault();setLoading(true);setError("");try{const data=await sbAuth("POST","token?grant_type=password",{email,password});sessionStorage.setItem("nyala_session",JSON.stringify({access_token:data.access_token,refresh_token:data.refresh_token}));onAuth(data.user,data.access_token);}catch(err){setError(err.message||"Sign in failed");}setLoading(false);}
+  async function signIn(e){e.preventDefault();setLoading(true);setError("");try{const data=await sbAuth("POST","token?grant_type=password",{email,password});if(!data.access_token||!data.user)throw new Error("Sign-in failed: Supabase returned no session.");sessionStorage.setItem("nyala_session",JSON.stringify({access_token:data.access_token,refresh_token:data.refresh_token}));onAuth(data.user,data.access_token);}catch(err){setError(err.message||"Sign in failed");}setLoading(false);}
   return <div style={{minHeight:"100vh",background:pageBg(),display:"flex",alignItems:"center",justifyContent:"center",padding:20,color:C.text,fontFamily:"'Inter','Segoe UI',system-ui,sans-serif"}}>
     <div style={{width:"100%",maxWidth:400}}>
       <div style={{textAlign:"center",marginBottom:40}}><div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:12,marginBottom:8}}><BrandWord size={34}/></div><p style={{color:C.sub,fontSize:14}}>Operations dashboard</p></div>
