@@ -150,8 +150,10 @@ const clCols=[{key:"name",label:"Client"},{key:"account_manager",label:"Account 
 const pubCols=[{key:"name",label:"Publisher"},{key:"contact_name",label:"Contact"},{key:"email",label:"Email"},{key:"phone",label:"Phone"},{key:"notes",label:"Notes"}];
 const crCols=[{key:"name",label:"Name"},{key:"length_seconds",label:"Length (sec)"},{key:"isci",label:"ISCI"},{key:"notes",label:"Notes"}];
 const clExportCols=[{key:"section",label:"Section"},{key:"task",label:"Task"},{key:"checked",label:"Complete",getValue:function(r){return r.checked?"Yes":"No";}},{key:"status",label:"Status"},{key:"owner",label:"Owner"},{key:"due_date",label:"Due Date"},{key:"notes",label:"Notes"}];
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+// Normalized: tolerate a pasted value with trailing slashes or an API path
+// (e.g. ".../rest/v1/") — every call below appends its own /rest|/auth|/functions path.
+const SUPABASE_URL = String(import.meta.env.VITE_SUPABASE_URL||"").trim().replace(/\/+$/,"").replace(/\/(rest|auth|functions|storage)\/v1.*$/i,"").replace(/\/+$/,"");
+const SUPABASE_ANON_KEY = String(import.meta.env.VITE_SUPABASE_ANON_KEY||"").trim();
 // ── Nyala Labs: company identity + feature switches ───────────────────────
 // Integrations Nyala does not use yet are switched OFF here rather than
 // deleted, so turning one on later is a one-line change (plus deploying its
