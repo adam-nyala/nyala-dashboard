@@ -169,9 +169,18 @@ const FEATURES={
   kaliper:false,     // AI call analysis columns/sections (needs call_analysis to be populated)
   mercury:false,     // Billing > Bank Feed (mercury-sync)
   roku:false,        // TV > Sync Roku button (roku-sync)
-  ioIntake:false,    // Integrations > IO Automation (was Zoho Sign based)
+  ioIntake:false,    // Integrations > IO Automation (OmniSure's Zoho Sign flow)
+  askClaude:false,   // floating Ask Claude panel (OmniSure's ask-claude function)
 };
 const GMAIL_CLIENT_ID_ENV=import.meta.env.VITE_GMAIL_CLIENT_ID||"";
+// HubSpot record links. hubspot-sync writes the portal id, UI domain and each
+// object's type id into crm_meta; the App loads it once after sign-in.
+const CRM_META={portalId:null,uiDomain:"app.hubspot.com",types:{}};
+function crmUrl(kind,id){
+  if(!id||!CRM_META.portalId)return null;
+  const t=CRM_META.types[kind]||(kind==="account"||kind==="prospect"||kind==="company"?"0-2":null);
+  return t?`https://${CRM_META.uiDomain}/contacts/${CRM_META.portalId}/record/${t}/${id}`:null;
+}
 // Loads ALL individual calls, from the company's first recorded call to
 // today, DAY BY DAY. Each request is a shallow, indexed single-day lookup,
 // so queries stay fast no matter how large history grows (deep OFFSET
@@ -354,9 +363,9 @@ const isConnCall=c=>c.connected!=null?!!c.connected:(Number(c.call_length_second
 const isBillCall=c=>c.billable!=null?!!c.billable:((c.revenue||0)>0);
 // Scoped navigation for the specialized roles (UI-level). admin/staff see everything.
 const NAV_BY_ROLE={
-  operations:["dashboard","sotu","creative","analysis","actuals","crm","config","people"],
-  finance:["dashboard","sotu","billing","analysis","people"],
-  sales:["dashboard","sotu","creative","crm","clientreports","analysis","people"],
+  operations:["dashboard","sotu","alerts","creative","analysis","pricing","actuals","crm","config","people"],
+  finance:["dashboard","sotu","alerts","billing","analysis","pricing","people"],
+  sales:["dashboard","sotu","alerts","creative","crm","clientreports","analysis","pricing","people"],
 };
 // Module gating inside the consolidated pages, mirroring prior page access.
 const CONFIG_MODS_BY_ROLE={operations:["integrations"]};
@@ -366,15 +375,16 @@ const PEOPLE_MODULES=[{id:"team",label:"Team"},{id:"agents",label:"Agents"},{id:
 // Which Analysis modules each role may open (admins and unlisted roles: all).
 // Mirrors the pages each role could reach before they were folded in.
 const ANALYSIS_MODS_BY_ROLE={
-  operations:["dispos","cashflow","pingbids"],
+  operations:["dispos","callintel","cashflow","pingbids"],
   finance:["cashflow"],
-  sales:["dispos"],
+  sales:["dispos","callintel"],
 };
 const ANALYSIS_MODULES=[
   {id:"analysis",label:"Analysis"},
   {id:"cashflow",label:"Cash Flow"},
   {id:"perfreport",label:"Perf vs Target"},
   {id:"dispos",label:"Dispositions"},
+  {id:"callintel",label:"Call Intelligence"},
   {id:"pingbids",label:"Pings & Bids"},
 ];
 function makeCard(){ return { background:C.surface, backgroundImage:"linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0))", border:`1px solid ${C.border}`, borderRadius:14, padding:"20px 24px", boxShadow:C.shadow }; }
@@ -402,6 +412,12 @@ function toDateStr(dateObj) {
   return `${y}-${m}-${d}`;
 }
 function fmtDate(d) { if(!d) return "—"; return parseLocalDate(d).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}); }
+// Day-of-week letter for a YYYY-MM-DD string, and a Monday test used for
+// the subtle week-start highlight in tables and charts.
+const DOW_L=["Su","M","Tu","W","Th","F","Sa"];
+function dowLetter(d){try{return DOW_L[parseLocalDate(String(d).slice(0,10)).getDay()]||"";}catch{return "";}}
+function isMondayD(d){try{return parseLocalDate(String(d).slice(0,10)).getDay()===1;}catch{return false;}}
+const mondayRowStyle={background:"rgba(122,162,255,0.055)",boxShadow:"inset 2px 0 0 rgba(122,162,255,0.45)"};
 function fmtShort(d) { if(!d) return "—"; return parseLocalDate(d).toLocaleDateString("en-US",{month:"short",day:"numeric"}); }
 // ── Nyala Labs Terms & Conditions (carried over from the OmniSure template — have counsel review before use) (appended to every generated invoice) ──
 const TERMS_AND_CONDITIONS = [
@@ -1289,7 +1305,7 @@ function Badge({status}) {
   const s=map[status]||{bg:C.muted,text:C.sub};
   return <span style={{background:s.bg,color:s.text,borderRadius:4,padding:"2px 8px",fontSize:12,fontWeight:600,whiteSpace:"nowrap"}}>{status||"—"}</span>;
 }
-function Table({cols,rows,emptyMsg="No entries yet.",expandedRow,renderExpanded}) {
+function Table({cols,rows,emptyMsg="No entries yet.",expandedRow,renderExpanded,rowStyle}) {
   cols=(cols||[]).filter(Boolean);
   const [sortKey,setSortKey]=useState(null);
   const [sortDir,setSortDir]=useState("asc");
@@ -1313,7 +1329,7 @@ function Table({cols,rows,emptyMsg="No entries yet.",expandedRow,renderExpanded}
         {c.label}{isSorted?(sortDir==="asc"?" ↑":" ↓"):""}
       </th>;
     })}</tr></thead>
-    <tbody>{sorted.length===0?<tr><td colSpan={cols.length} style={{textAlign:"center",padding:32,color:C.sub}}>{emptyMsg}</td></tr>:sorted.map((row,i)=>[<tr className="o-row" key={(row.id??row.key??i)+"_main"} style={{background:i%2===0?"transparent":"rgba(255,255,255,0.02)"}}>{cols.map(c=><td key={c.key} style={{padding:"10px 12px",color:C.text,textAlign:c.right?"right":"left",borderBottom:`1px solid rgba(255,255,255,0.04)`,whiteSpace:(c.right||c.nowrap)?"nowrap":"normal",overflowWrap:"anywhere",verticalAlign:"middle"}}>{c.render?c.render(row[c.key],row):(row[c.key]??"—")}</td>)}</tr>,
+    <tbody>{sorted.length===0?<tr><td colSpan={cols.length} style={{textAlign:"center",padding:32,color:C.sub}}>{emptyMsg}</td></tr>:sorted.map((row,i)=>[<tr className="o-row" key={(row.id??row.key??i)+"_main"} style={{background:i%2===0?"transparent":"rgba(255,255,255,0.02)",...(rowStyle?rowStyle(row):{})}}>{cols.map(c=><td key={c.key} style={{padding:"10px 12px",color:C.text,textAlign:c.right?"right":"left",borderBottom:`1px solid rgba(255,255,255,0.04)`,whiteSpace:(c.right||c.nowrap)?"nowrap":"normal",overflowWrap:"anywhere",verticalAlign:"middle"}}>{c.render?c.render(row[c.key],row):(row[c.key]??"—")}</td>)}</tr>,
       renderExpanded&&expandedRow===(row.id??row.key)?<tr key={(row.id??row.key??i)+"_exp"}><td colSpan={cols.length} style={{padding:0,borderBottom:`1px solid rgba(255,255,255,0.04)`}}>{renderExpanded(row)}</td></tr>:null])}
     </tbody></table></div>;
 }
@@ -1340,6 +1356,35 @@ function usePersistentState(key, fallback){
     });
   },[key]);
   return [v,set];
+}
+// Date-range filters that survive navigation instead of snapping back to a
+// default window. Saved with the ET day they were last touched: a range
+// whose end WAS "today" when saved is a rolling window — on a later day it
+// slides so it still ends today at the same length — while a range set to
+// explicit past dates stays exactly where the user put it.
+function usePersistentRange(key,defaultDays){
+  const F=new Intl.DateTimeFormat("en-CA",{timeZone:"America/New_York",year:"numeric",month:"2-digit",day:"2-digit"});
+  const today=F.format(new Date());
+  const shiftD=(ds,n)=>{const d=new Date(ds+"T12:00:00");d.setDate(d.getDate()+n);return F.format(d);};
+  const [v,setV]=useState(()=>{
+    try{
+      const sv=JSON.parse(localStorage.getItem(key)||"null");
+      if(sv&&sv.start&&sv.end){
+        if(sv.end===sv.saved&&sv.saved!==today){
+          const len=Math.max(0,Math.round((new Date(sv.end+"T12:00:00")-new Date(sv.start+"T12:00:00"))/864e5));
+          return {start:shiftD(today,-len),end:today,saved:today};
+        }
+        return sv;
+      }
+    }catch{}
+    return {start:shiftD(today,-(defaultDays-1)),end:today,saved:today};
+  });
+  const mkSet=part=>val=>setV(prev=>{
+    const nv={...prev,[part]:val,saved:today};
+    try{localStorage.setItem(key,JSON.stringify(nv));}catch{}
+    return nv;
+  });
+  return [v.start,v.end,useCallback(mkSet("start"),[key]),useCallback(mkSet("end"),[key])];
 }
 function Textarea(props){return <textarea style={{...inputStyle,minHeight:80,resize:"vertical"}} {...props}/>;}
 function Select({children,...props}){return <select style={{...inputStyle,cursor:"pointer"}} {...props}>{children}</select>;}
@@ -1368,8 +1413,8 @@ function BarChart({data,valueKey,labelKey,color=C.accent,height=160,formatValue}
         <div style={{fontWeight:700,color:C.text,marginBottom:2}}>{d[labelKey]}</div>
         <div style={{...mono,color:isNeg?C.red:color}}>{fmtVal(val)}</div>
       </div>}
-      <div style={{width:"100%",height:barH,background:`linear-gradient(180deg, ${isNeg?C.red:color}, ${isNeg?C.red:color}88)`,borderRadius:"4px 4px 0 0",opacity:hovered?1:0.9,boxShadow:hovered?`0 0 14px ${isNeg?C.red:color}66`:"none",transition:"box-shadow .15s ease, opacity .15s ease"}}/>
-      <div style={{fontSize:9,color:hovered?C.text:C.dim,textAlign:"center",whiteSpace:"nowrap",overflow:"visible",height:12}}>{(hovered||i%labelEvery===0)?d[labelKey]:""}</div>
+      <div style={{width:"100%",height:barH,background:`linear-gradient(180deg, ${isNeg?C.red:color}, ${isNeg?C.red:color}88)`,borderRadius:"4px 4px 0 0",opacity:hovered?1:0.9,boxShadow:hovered?`0 0 14px ${isNeg?C.red:color}66`:(d._hl?`0 0 0 1px ${C.accent}55`:"none"),transition:"box-shadow .15s ease, opacity .15s ease"}}/>
+      <div style={{fontSize:9,color:hovered?C.text:(d._hl?C.accent:C.dim),fontWeight:d._hl?700:400,textAlign:"center",whiteSpace:"nowrap",overflow:"visible",height:12}}>{(hovered||i%labelEvery===0||d._hl)?d[labelKey]:""}</div>
     </div>;
   })}</div>;
 }
@@ -1568,8 +1613,17 @@ function Configuration({clients,publishers,clientCampaigns,publisherCampaigns,ca
     ["alert_low_billable","Short Calls","A publisher's billable-to-connected % falls below the floor"],
     ["alert_volume_drop","Volume Drop","A campaign's billable calls run behind its 7-day pace"],
     ["alert_overdue_invoices","Overdue Invoices","Daily digest when AR invoices or AP bills are past due"],
+    ["alert_launch","Launch With No Calls","A campaign past its launch date has not taken a call"],
+    ["alert_noroute","No-Route Spikes","A big share of a campaign's calls today found no buyer"],
+    ["alert_pub_share","Pub Behind Usual Share","A publisher is well under what its 7-day share predicts for today"],
+    ["alert_buyer_conversion","Buyer Not Converting","A buyer's billable rate collapses vs its 7-day rate, or it goes silent"],
+    ["alert_losing_lane","Money-Losing Lanes","A campaign + publisher lane pays out more than it bills today"],
+    ["alert_nontv","Non-TV on TV Campaigns","AI tags show a pub's TV-campaign callers citing pop-ups, social or search"],
+    ["alert_promise","Free Coverage Promises","AI tags show callers told the ad promised free coverage, cards, cash or a government program"],
+    ["alert_transfer","Transfers on Inbound","AI tags show transferred callers arriving on inbound-rate campaigns"],
+    ["alert_deadair","Dead Air (AI Tag)","AI tags show one-sided or silent audio on a pub's connected calls"],
   ];
-  const [notifForm,setNotifForm]=useState({email:"",name:"",alert_buyer_accept:true,alert_publisher_pace:true,alert_rpc_drop:true,alert_low_billable:true,alert_volume_drop:true,alert_overdue_invoices:true});
+  const [notifForm,setNotifForm]=useState({email:"",name:"",alert_buyer_accept:true,alert_publisher_pace:true,alert_rpc_drop:true,alert_low_billable:true,alert_volume_drop:true,alert_overdue_invoices:true,alert_launch:true,alert_noroute:true,alert_pub_share:true,alert_buyer_conversion:true,alert_losing_lane:true,alert_nontv:true,alert_promise:true,alert_transfer:true,alert_deadair:true});
   const [savingNotif,setSavingNotif]=useState(false);
   const [alertRules,setAlertRules]=useState(null);
   const [ruleEdits,setRuleEdits]=useState({});
@@ -1694,8 +1748,11 @@ function Configuration({clients,publishers,clientCampaigns,publisherCampaigns,ca
   }
   const emptyClient={name:"",contact_name:"",contact_email:"",billing_contact:"",billing_email:"",biz_dev:"",account_manager:"",address_line1:"",city:"",state:"",zip:"",notes:"",active:true};
   const emptyPub={name:"",contact_name:"",contact_email:"",billing_contact:"",billing_email:"",account_manager:"",notes:""};
-  const emptyCC={name:"",vertical:"",price_per_call:"",billing_frequency:"monthly",billing_type:"net_terms",net_terms:30,start_date:"",active:true,callgrid_campaign_name:"",daily_call_target:""};
-  const emptyPC={name:"",vertical:"",cost_per_call:"",billing_frequency:"weekly",billing_type:"net_terms",net_terms:14,start_date:"",active:true,callgrid_publisher_name:"",daily_call_target:""};
+  // Default terms on new campaigns (per Emily): buyers weekly net 7,
+  // publishers monthly net 30 — so cash flow reads right before anyone
+  // manually sets terms. A client's account defaults still win when set.
+  const emptyCC={name:"",vertical:"",price_per_call:"",billing_frequency:"weekly",billing_type:"net_terms",net_terms:7,start_date:"",active:true,callgrid_campaign_name:"",daily_call_target:""};
+  const emptyPC={name:"",vertical:"",cost_per_call:"",billing_frequency:"monthly",billing_type:"net_terms",net_terms:30,start_date:"",active:true,callgrid_publisher_name:"",callgrid_campaign_name:"",daily_call_target:""};
   function openModal(type,parent=null,row=null){
     setModalType(type);setParentRow(parent);setEditRow(row);
     if(type==="client") setForm(row||emptyClient);
@@ -1911,6 +1968,7 @@ function Configuration({clients,publishers,clientCampaigns,publisherCampaigns,ca
                           <span> · {freqLabel[pc.billing_frequency]||pc.billing_frequency} · {pc.billing_type==="prepay"?<span style={{color:C.teal}}>Prepay</span>:`Net-${pc.net_terms}`}</span>
                           {!pc.active&&<span style={{color:C.red}}> · Inactive</span>}
                         </div>
+                        {(pc.callgrid_campaign_name||pc.callgrid_publisher_name)&&<div style={{fontSize:12,color:C.sub,marginTop:3}}>CallGrid: <span style={{color:C.teal}}>{pc.callgrid_campaign_name||"(vendor-level legacy)"}</span>{pc.callgrid_publisher_name&&<span> · Source: <span style={{color:C.green}}>{pc.callgrid_publisher_name}</span></span>}</div>}
                         {linked.length>0&&<div style={{fontSize:12,color:C.sub,marginTop:4}}>Linked to: {linked.map(l=>getCCName(l.client_campaign_id)).join(", ")}</div>}
                       </div>
                       <div style={{display:"flex",gap:6}}>
@@ -1938,7 +1996,7 @@ function Configuration({clients,publishers,clientCampaigns,publisherCampaigns,ca
       {tab==="notifications"&&<div>
         <div style={{marginBottom:24}}>
           <div style={{fontSize:15,fontWeight:700,color:C.text}}>Alert Rules</div>
-          <div style={{fontSize:12,color:C.sub,margin:"2px 0 12px"}}>The alert engine checks these every 15 minutes. Fired alerts show on the 🔔 Alerts bell (bottom of the sidebar), pop up for anyone in the dashboard, and email the recipients below. Acknowledging an alert stops it re-firing for the day.</div>
+          <div style={{fontSize:12,color:C.sub,margin:"2px 0 12px"}}>The alert engine checks these every 15 minutes. Fired alerts appear on the 🔔 Alerts page (sidebar), each with what it means and what to do, and email the recipients below. Acknowledging an alert stops it re-firing until the rule's cooldown.</div>
           <div style={card}>
             {alertRules===null&&<div style={{color:C.sub,fontSize:13,padding:12}}>Loading rules…</div>}
             {alertRules&&alertRules.map(r=>{
@@ -2039,7 +2097,7 @@ function Configuration({clients,publishers,clientCampaigns,publisherCampaigns,ca
             <Field label="State"><Input value={form.state||""} onChange={e=>setForm({...form,state:e.target.value})}/></Field>
             <Field label="ZIP"><Input value={form.zip||""} onChange={e=>setForm({...form,zip:e.target.value})}/></Field>
             <Field label="Account Status"><Select value={form.active===false?"inactive":"active"} onChange={e=>setForm({...form,active:e.target.value==="active"})}><option value="active">Active</option><option value="inactive">Inactive</option></Select></Field>
-            <Field label=" "><div style={{fontSize:11,color:C.sub,paddingTop:8}}>Two-way with HubSpot: changing this pushes account_status to the linked HubSpot company, and changes made in HubSpot flow back on the next sync.</div></Field>
+            <Field label=" "><div style={{fontSize:11,color:C.sub,paddingTop:8}}>Two-way with HubSpot: changing this pushes Account Status to the linked HubSpot company, and changes made in HubSpot flow back here.</div></Field>
             <Field label="Default Billing Type"><Select value={form.default_billing_type||"net_terms"} onChange={e=>setForm({...form,default_billing_type:e.target.value})}><option value="net_terms">Net Terms</option><option value="prepay">Prepay</option></Select></Field>
             <Field label="Default Net Terms (days)"><Input type="number" value={form.default_net_terms??30} onChange={e=>setForm({...form,default_net_terms:e.target.value===""?null:parseInt(e.target.value)||0})}/></Field>
             <Field label="Default Billing Frequency"><Select value={form.default_billing_frequency||"monthly"} onChange={e=>setForm({...form,default_billing_frequency:e.target.value})}><option value="monthly">Monthly</option><option value="weekly">Weekly</option><option value="biweekly">Biweekly</option><option value="bimonthly">Bi-Monthly (1st & 15th)</option></Select></Field>
@@ -2107,6 +2165,10 @@ function Configuration({clients,publishers,clientCampaigns,publisherCampaigns,ca
           <Field label="CallGrid Publisher Name" span>
             <Input value={form.callgrid_publisher_name||""} onChange={e=>setForm({...form,callgrid_publisher_name:e.target.value})} placeholder="Exact publisher name as it appears in CallGrid"/>
             <div style={{fontSize:11,color:C.sub,marginTop:4}}>Used to match CallGrid call data to this publisher when syncing. If CallGrid spells this publisher inconsistently, list every variant separated by commas (e.g. "Call Tofic, Calltofic").</div>
+          </Field>
+          <Field label="CallGrid Campaign Name" span>
+            <Input value={form.callgrid_campaign_name||""} onChange={e=>setForm({...form,callgrid_campaign_name:e.target.value})} placeholder='Exact campaign name in CallGrid (e.g. "Final Expense CTV - RTB")'/>
+            <div style={{fontSize:11,color:C.sub,marginTop:4}}>Each publisher campaign maps to one CallGrid campaign, exactly like client campaigns. Leave blank only on old legacy catch-all rows.</div>
           </Field>
           {form.name&&<Field label="Auto-generated Name" span><div style={{padding:"9px 12px",background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,fontSize:13,color:C.orange}}>{form.name}</div></Field>}
         </div>}
@@ -7746,11 +7808,11 @@ function TVBooking({tvCampaigns,tvCampaignClients,tvCampaignNetworks,tvBookings,
     </div>
     {view==="campaigns"&&<CampaignsView/>}
     {view==="networks"&&<NetworksView/>}
-    {view==="mediaplan"&&<MediaPlanView/>}
-    {view==="buysheet"&&<BuySheetView/>}
-    {view==="spotlog"&&<SpotLogView/>}
-    {view==="bookings"&&<BookingsView/>}
-    {view==="traffic"&&<TrafficView/>}
+    {view==="mediaplan"&&<React.Fragment><MediaPlanView/>{FEATURES.roku&&<RokuMediaBridge mode="plan"/>}</React.Fragment>}
+    {view==="buysheet"&&<React.Fragment><BuySheetView/>{FEATURES.roku&&<RokuMediaBridge mode="buysheet"/>}</React.Fragment>}
+    {view==="spotlog"&&<React.Fragment><SpotLogView/>{FEATURES.roku&&<RokuMediaBridge mode="spotlog"/>}</React.Fragment>}
+    {view==="bookings"&&<React.Fragment><BookingsView/>{FEATURES.roku&&<RokuMediaBridge mode="bookings"/>}</React.Fragment>}
+    {view==="traffic"&&<React.Fragment><TrafficView/>{FEATURES.roku&&<RokuMediaBridge mode="traffic" tvCreatives={tvCreatives}/>}</React.Fragment>}
   </div>;
 }
 function Projections({clientCampaigns,publisherCampaigns,campaignLinks,settings,onSaveSettings,tvCampaigns,tvCampaignClients,tvCampaignNetworks,tvBookings,callgridCalls,clientCampaignRates,pubCampaignRates,arRows,apRows}) {
@@ -8797,9 +8859,711 @@ function Projections({clientCampaigns,publisherCampaigns,campaignLinks,settings,
     </Modal>}
   </div>;
 }
+// ── RokuMediaBridge: auto "From Roku" sections inside the TV Media views.
+// Read-only by construction (computed live from the hourly Roku mirror, no
+// synthetic rows in the booking tables): plan/buy sheet allocate the ad-group
+// budget evenly across the flight, and actuals replace plan as days pass.
+// Traffic mode pairs each Roku campaign to a tracked creative (saved on
+// roku_campaigns.linked_creative_id). ──
+function RokuMediaBridge({mode,tvCreatives}){
+  const [camps,setCamps]=useState(null);
+  const [stats,setStats]=useState([]);
+  const [busy,setBusy]=useState(null);
+  const load=React.useCallback(async()=>{
+    try{
+      const [c,st]=await Promise.all([
+        sbAll("roku_campaigns?select=*&order=start_date.desc.nullslast"),
+        sbAll("roku_daily_stats?select=*"),
+      ]);
+      setCamps(c||[]);setStats(st||[]);
+    }catch(e){setCamps([]);}
+  },[]);
+  useEffect(()=>{load();},[load]);
+  if(camps===null||!camps.length)return null; // nothing mirrored yet → stay invisible
+  const today=new Date().toISOString().slice(0,10);
+  const vertOf=n=>/final expense|(^|\W)fe(\W|$)/i.test(n)?"FE":/medicare/i.test(n)?"Medicare":/(^|\W)aca(\W|$)/i.test(n)?"ACA":/u65/i.test(n)?"U65":"Other";
+  const statBy=new Map();
+  for(const r of stats){let a=statBy.get(r.campaign_uid);if(!a){a=new Map();statBy.set(r.campaign_uid,a);}a.set(String(r.date),r);}
+  const flightDays=c=>c.start_date&&c.end_date?Math.max(1,Math.round((new Date(c.end_date)-new Date(c.start_date))/864e5)+1):null;
+  const dailyRate=c=>{const fd=flightDays(c);return fd&&c.budget?c.budget/fd:null;};
+  const spentToDate=c=>{let t=0;for(const [,r] of (statBy.get(c.uid)||new Map()))t+=Number(r.spend||0);return t;};
+  const ag=c=>Array.isArray(c.raw?.attributes?.ad_groups)?c.raw.attributes.ad_groups[0]:null;
+  const daypartTxt=c=>{const g=ag(c);const sc=g?.dayparts?.schedule||[];if(!sc.length)return "all hours";
+    const days=sc.map(x=>String(x.day_of_week||"").slice(0,2)).join(" ");
+    return `${days} ${sc[0].start_hour}:00-${sc[0].end_hour}:00`;};
+  const targetTxt=c=>{const g=ag(c);if(!g)return "—";
+    const ages=(g.audience_targeting?.included?.age||[]).map(a=>String(a).replace("Ages ","")).join(", ");
+    const exSt=(g.location_targeting?.excluded||[]).length;
+    return `${ages||"all ages"}${exSt?` · ${exSt} states excluded`:""}`;};
+  const badge=<span style={{fontSize:9,fontWeight:800,color:"#9146ff",border:"1px solid #9146ff",borderRadius:4,padding:"1px 6px",letterSpacing:"0.06em"}}>ROKU · AUTO</span>;
+  const td={padding:"7px 8px",borderBottom:`1px solid ${C.border}`,fontSize:12,color:C.text,verticalAlign:"top"};
+  const tdR={...td,textAlign:"right",...mono};
+  const th={padding:"6px 8px",borderBottom:`2px solid ${C.border}`,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",color:C.sub,textAlign:"left",whiteSpace:"nowrap"};
+  const thR={...th,textAlign:"right"};
+  const vchip=v=><span style={{fontSize:10,fontWeight:700,color:C.teal,border:`1px solid ${C.teal}`,borderRadius:4,padding:"1px 6px"}}>{v}</span>;
+  const wrap=(title,inner,note)=><div style={{...card,marginTop:16,overflowX:"auto"}}>
+    <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:10}}>
+      <span style={{fontSize:13,fontWeight:700,color:C.text}}>{title}</span>{badge}
+    </div>
+    {inner}
+    {note&&<div style={{fontSize:11,color:C.dim,marginTop:8}}>{note}</div>}
+  </div>;
+  const active=camps.filter(c=>!c.is_archived);
+
+  if(mode==="plan"||mode==="buysheet"){
+    if(mode==="plan")return wrap("Media plan lines from Roku",
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:950}}>
+        <thead><tr><th style={th}>Vertical</th><th style={th}>Campaign</th><th style={th}>Flight</th><th style={thR}>Budget</th><th style={thR}>Daily alloc.</th><th style={th}>Dayparts</th><th style={th}>Targeting</th><th style={th}>Status</th></tr></thead>
+        <tbody>{active.map(c=><tr key={c.uid}>
+          <td style={td}>{vchip(vertOf(c.name||""))}</td>
+          <td style={{...td,fontWeight:700,maxWidth:240}}>{c.name}</td>
+          <td style={{...td,...mono,fontSize:11,whiteSpace:"nowrap"}}>{c.start_date||"?"} → {c.end_date||"?"}</td>
+          <td style={tdR}>{c.budget!=null?fmt$(c.budget):"—"}</td>
+          <td style={tdR}>{dailyRate(c)!=null?fmt$(dailyRate(c)):"—"}</td>
+          <td style={{...td,fontSize:11}}>{daypartTxt(c)}</td>
+          <td style={{...td,fontSize:11,maxWidth:220}}>{targetTxt(c)}</td>
+          <td style={{...td,fontSize:11,color:c.status==="ended"?C.dim:C.green}}>{c.status}</td>
+        </tr>)}</tbody>
+      </table>,
+      "Allocated evenly across each flight from the ad group budget. Lines come straight from Roku and update hourly; edit them in Roku Ads Manager, not here.");
+    // buy sheet: per campaign per week, planned vs actual
+    const rows=[];
+    for(const c of active){
+      if(!c.start_date||!c.end_date)continue;
+      const rate=dailyRate(c)||0;
+      const sd=new Date(c.start_date+"T12:00:00"),ed=new Date(c.end_date+"T12:00:00");
+      const wkStart=d=>{const x=new Date(d);x.setDate(x.getDate()-((x.getDay()+6)%7));return x;};
+      for(let w=wkStart(sd);w<=ed;w.setDate(w.getDate()+7)){
+        const ws=w.toISOString().slice(0,10);
+        let days=0,actual=0,imp=0;
+        for(let i=0;i<7;i++){
+          const d=new Date(w);d.setDate(d.getDate()+i);
+          const ds=d.toISOString().slice(0,10);
+          if(ds<c.start_date||ds>c.end_date)continue;
+          days++;
+          const st=(statBy.get(c.uid)||new Map()).get(ds);
+          if(st){actual+=Number(st.spend||0);imp+=Number(st.impressions||0);}
+        }
+        if(days)rows.push({key:`${c.uid}|${ws}`,name:c.name,ws,days,planned:rate*days,actual,imp,past:ws<=today});
+      }
+    }
+    rows.sort((a,b)=>b.ws.localeCompare(a.ws)||a.name.localeCompare(b.name));
+    return wrap("Buy sheet from Roku — planned vs delivered",
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:900}}>
+        <thead><tr><th style={th}>Week of</th><th style={th}>Campaign</th><th style={thR}>Flight days</th><th style={thR}>Planned</th><th style={thR}>Delivered</th><th style={thR}>±</th><th style={thR}>Impressions</th></tr></thead>
+        <tbody>{rows.map(r=>{const diff=r.actual-r.planned;return <tr key={r.key} style={{opacity:r.past?1:0.65}}>
+          <td style={{...td,...mono,fontSize:11}}>{r.ws}</td>
+          <td style={{...td,maxWidth:260}}>{r.name}</td>
+          <td style={tdR}>{r.days}</td>
+          <td style={tdR}>{fmt$(r.planned)}</td>
+          <td style={{...tdR,color:r.actual?C.amber:C.dim}}>{r.actual?fmt$(r.actual):(r.past?"$0":"—")}</td>
+          <td style={{...tdR,color:!r.past||!r.actual?C.dim:Math.abs(diff)<r.planned*0.15?C.green:C.red}}>{r.past&&r.actual?`${diff>=0?"+":""}${fmt$(diff)}`:"—"}</td>
+          <td style={tdR}>{r.imp?r.imp.toLocaleString():"—"}</td>
+        </tr>;})}</tbody>
+      </table>,
+      "Planned = even split of the ad group budget. Delivered replaces plan as days pass; future weeks show dimmed.");
+  }
+
+  if(mode==="spotlog"){
+    const rows=[];
+    for(const c of active)for(const [,r] of (statBy.get(c.uid)||new Map()))if(Number(r.impressions||0)>0)rows.push({...r,name:c.name});
+    rows.sort((a,b)=>String(b.date).localeCompare(String(a.date))||a.name.localeCompare(b.name));
+    return wrap("Roku daily delivery (programmatic — no spot-level airings)",
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:820}}>
+        <thead><tr><th style={th}>Date</th><th style={th}>Campaign</th><th style={thR}>Impressions</th><th style={thR}>Spend</th><th style={thR}>CPM</th><th style={thR}>Completes</th><th style={thR}>Roku conv.</th></tr></thead>
+        <tbody>{rows.slice(0,120).map(r=><tr key={`${r.campaign_uid}|${r.date}`}>
+          <td style={{...td,...mono,fontSize:11}}>{r.date}</td>
+          <td style={{...td,maxWidth:260}}>{r.name}</td>
+          <td style={tdR}>{Number(r.impressions).toLocaleString()}</td>
+          <td style={{...tdR,color:C.amber}}>{fmt$(Number(r.spend||0))}</td>
+          <td style={tdR}>{r.impressions?fmt$(Number(r.spend||0)/Number(r.impressions)*1000):"—"}</td>
+          <td style={tdR}>{Number(r.video_completes||0).toLocaleString()}</td>
+          <td style={tdR}>{Number(r.actions||0)||"—"}</td>
+        </tr>)}</tbody>
+      </table>,
+      "Roku is programmatic, so delivery is daily, not per airing. Newest 120 rows shown.");
+  }
+
+  if(mode==="bookings"){
+    return wrap("Roku bookings",
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:860}}>
+        <thead><tr><th style={th}>Network</th><th style={th}>Campaign</th><th style={th}>Flight</th><th style={thR}>Booked</th><th style={thR}>Aired to date</th><th style={thR}>Remaining</th><th style={thR}>Pace</th></tr></thead>
+        <tbody>{active.map(c=>{
+          const spent=spentToDate(c);const fd=flightDays(c);
+          let pace=null;
+          if(c.budget&&fd&&c.start_date&&c.start_date<=today){
+            const gone=Math.min(fd,Math.max(1,Math.round((new Date((today<(c.end_date||today)?today:c.end_date)+"T12:00:00")-new Date(c.start_date+"T12:00:00"))/864e5)+1));
+            const exp=c.budget*(gone/fd);
+            pace=exp>0?spent/exp:null;
+          }
+          return <tr key={c.uid}>
+            <td style={{...td,fontWeight:700}}>Roku</td>
+            <td style={{...td,maxWidth:260}}>{c.name}</td>
+            <td style={{...td,...mono,fontSize:11,whiteSpace:"nowrap"}}>{c.start_date||"?"} → {c.end_date||"?"}</td>
+            <td style={tdR}>{c.budget!=null?fmt$(c.budget):"—"}</td>
+            <td style={{...tdR,color:C.amber}}>{spent?fmt$(spent):"—"}</td>
+            <td style={tdR}>{c.budget!=null?fmt$(Math.max(0,c.budget-spent)):"—"}</td>
+            <td style={{...tdR,color:pace==null?C.dim:pace<0.8?C.amber:pace>1.15?C.red:C.green}}>{pace==null?"—":`${Math.round(pace*100)}%`}</td>
+          </tr>;})}</tbody>
+      </table>,
+      "Booked = Roku ad group budget; aired updates hourly from delivery. Managed in Roku Ads Manager — read-only here by design.");
+  }
+
+  if(mode==="traffic"){
+    return wrap("Roku campaign → creative pairing",
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:720}}>
+        <thead><tr><th style={th}>Roku campaign</th><th style={th}>Status</th><th style={th}>Tracked creative (spot)</th></tr></thead>
+        <tbody>{active.map(c=><tr key={c.uid}>
+          <td style={{...td,fontWeight:700,maxWidth:280}}>{c.name}</td>
+          <td style={{...td,fontSize:11,color:c.status==="ended"?C.dim:C.green}}>{c.status}</td>
+          <td style={td}>
+            <select value={c.linked_creative_id||""} disabled={busy===c.uid} onChange={async e=>{
+              const v=e.target.value||null;setBusy(c.uid);
+              try{await sb("PATCH",`roku_campaigns?uid=eq.${encodeURIComponent(c.uid)}`,{linked_creative_id:v});await load();}
+              catch(err){alert(`Could not save: ${err?.message||err}`);}
+              setBusy(null);
+            }} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,color:C.text,padding:"5px 8px",fontSize:12,maxWidth:320}}>
+              <option value="">— not paired —</option>
+              {(tvCreatives||[]).map(cr=><option key={cr.id} value={cr.id}>{cr.name}</option>)}
+            </select>
+          </td>
+        </tr>)}</tbody>
+      </table>,
+      "Roku's API does not expose creative names yet, so pair each campaign to its tracked spot here once; the pairing survives syncs.");
+  }
+  return null;
+}
+
+// ── Roku Ads: booking outlook + daily delivery, mirrored hourly from the
+// Roku Ads API (roku_campaigns / roku_daily_stats). Spend arrives in dollars
+// (converted from micro-dollars by the sync). Internal CTV calls ride along
+// per day for the delivery-vs-calls read. ──
+function RokuView({callgridCalls,filterStart,filterEnd}){
+  const [camps,setCamps]=useState(null);
+  const [stats,setStats]=useState([]);
+  const [creativeNames,setCreativeNames]=useState(new Map());
+  const [crStats,setCrStats]=useState([]); // creative-level report rows
+  const [openDay,setOpenDay]=useState(null); // expanded daily-delivery row
+  const [rkRange,setRkRange]=usePersistentState("roku_range","all"); // all | range
+  useEffect(()=>{(async()=>{
+    try{
+      const [c,st,cr,rcs]=await Promise.all([
+        sbAll("roku_campaigns?select=*&order=start_date.desc.nullslast"),
+        sbAll("roku_daily_stats?select=*&order=date.desc"),
+        sbAll("tv_creatives?select=id,name").catch(()=>[]),
+        sbAll("roku_creative_stats?select=campaign_id,tv_creative_id,date,spend").catch(()=>[]),
+      ]);
+      setCamps(c||[]);setStats(st||[]);setCreativeNames(new Map((cr||[]).map(x=>[x.id,x.name])));setCrStats(rcs||[]);
+    }catch(e){setCamps([]);}
+  })();},[]);
+  const today=new Date().toISOString().slice(0,10);
+  const inRange=d=>rkRange==="all"?true:((!filterStart||d>=filterStart)&&(!filterEnd||d<=filterEnd));
+  const td={padding:"7px 8px",borderBottom:`1px solid ${C.border}`,fontSize:12,color:C.text,verticalAlign:"top"};
+  const tdR={...td,textAlign:"right",...mono};
+  const th={padding:"6px 8px",borderBottom:`2px solid ${C.border}`,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",color:C.sub,textAlign:"left",whiteSpace:"nowrap"};
+  const thR={...th,textAlign:"right"};
+  if(camps===null)return <div style={{color:C.sub,fontSize:13}}>Loading Roku data…</div>;
+  if(!camps.length)return <div style={{...card,textAlign:"center",color:C.sub,padding:40}}>No Roku campaigns mirrored yet — run the Roku migration and sync first.</div>;
+  const statByCamp=new Map();
+  for(const r of stats){let a=statByCamp.get(r.campaign_uid);if(!a){a=[];statByCamp.set(r.campaign_uid,a);}a.push(r);}
+  // automatic campaign→spots mapping + the set of spots that aired on Roku,
+  // both straight from the creative report (manual pairing = fallback only)
+  const campTv=new Map();const rokuTvSet=new Set();
+  for(const r of crStats){
+    if(!r.tv_creative_id)continue;
+    rokuTvSet.add(r.tv_creative_id);
+    if(r.campaign_id){let st2=campTv.get(String(r.campaign_id));if(!st2){st2=new Set();campTv.set(String(r.campaign_id),st2);}st2.add(r.tv_creative_id);}
+  }
+  const spotsOf=c=>{const st2=campTv.get(String(c.uid));if(st2&&st2.size)return [...st2];return c.linked_creative_id?[c.linked_creative_id]:[];};
+  // a call can only be Roku's on a day Roku actually delivered — the TFN
+  // cannot tell platforms apart, so zero-delivery days get zero Roku calls
+  const deliveredDays=new Set();
+  const campDays=new Map();
+  for(const r of stats){
+    if(Number(r.impressions||0)<=0)continue;
+    const d=String(r.date);
+    deliveredDays.add(d);
+    let ds=campDays.get(r.campaign_uid);if(!ds){ds=new Set();campDays.set(r.campaign_uid,ds);}ds.add(d);
+  }
+  const stateOf=c=>{
+    if(c.status==="ended"||(c.end_date&&c.end_date<today))return ["ENDED",C.dim];
+    if(c.status==="draft")return ["DRAFT",C.sub];
+    if(c.start_date&&c.start_date>today)return ["SCHEDULED",C.accent];
+    if(c.is_enabled===false)return ["PAUSED",C.amber];
+    return ["LIVE",C.green];
+  };
+  const rows=camps.map(c=>{
+    const st=statByCamp.get(c.uid)||[];
+    const spent=st.reduce((t,r)=>t+Number(r.spend||0),0);
+    const imp=st.reduce((t,r)=>t+Number(r.impressions||0),0);
+    const compl=st.reduce((t,r)=>t+Number(r.video_completes||0),0);
+    const acts=st.reduce((t,r)=>t+Number(r.actions||0),0);
+    let pace=null;
+    if(c.budget&&c.start_date&&c.end_date&&c.start_date<=today){
+      const total=Math.max(1,(new Date(c.end_date)-new Date(c.start_date))/864e5+1);
+      const gone=Math.min(total,Math.max(1,(new Date(today<c.end_date?today:c.end_date)-new Date(c.start_date))/864e5+1));
+      const expected=c.budget*(gone/total);
+      pace=expected>0?spent/expected:null;
+    }
+    const [label,color]=stateOf(c);
+    return {c,label,color,spent,imp,compl,acts,pace};
+  });
+  const live=rows.filter(r=>r.label==="LIVE"||r.label==="SCHEDULED");
+  const rangeStats=stats.filter(r=>inRange(String(r.date)));
+  const rs=rangeStats.reduce((t,r)=>{t.spend+=Number(r.spend||0);t.imp+=Number(r.impressions||0);t.compl+=Number(r.video_completes||0);t.acts+=Number(r.actions||0);return t;},{spend:0,imp:0,compl:0,acts:0});
+  // calls by day: TFN-attributed calls on spots the report says aired on
+  // Roku — the same attribution every other view uses. Before the first
+  // report lands, fall back to internal-publisher calls (clearly weaker).
+  const callsByDay=new Map();
+  const callRowsByDay=new Map(); // day -> raw calls, for the TFN drill-down
+  for(const cl of (callgridCalls||[])){
+    if(rokuTvSet.size){if(!cl.tv_creative_id||!rokuTvSet.has(cl.tv_creative_id))continue;}
+    else if(!/internal/i.test(String(cl.publisher_name||"")))continue;
+    const d=String(cl.date||"").slice(0,10);
+    if(!deliveredDays.has(d))continue; // no Roku delivery that day → not a Roku call
+    if(!inRange(d))continue;
+    let a=callsByDay.get(d);if(!a){a={n:0,bill:0,rev:0};callsByDay.set(d,a);}
+    a.n++;if(cl.billable)a.bill++;a.rev+=Number(cl.revenue||0);
+    let rws=callRowsByDay.get(d);if(!rws){rws=[];callRowsByDay.set(d,rws);}rws.push(cl);
+  }
+  const fmtTfn=x=>{const d=String(x||"").replace(/\D/g,"").slice(-10);return d?`${d.slice(0,3)}-${d.slice(3,6)}-${d.slice(6)}`:"—";};
+  const dayMap=new Map();
+  for(const r of rangeStats){
+    let a=dayMap.get(String(r.date));
+    if(!a){a={date:String(r.date),imp:0,spend:0,compl:0,acts:0};dayMap.set(String(r.date),a);}
+    a.imp+=Number(r.impressions||0);a.spend+=Number(r.spend||0);a.compl+=Number(r.video_completes||0);a.acts+=Number(r.actions||0);
+  }
+  for(const [d] of callsByDay)if(!dayMap.has(d))dayMap.set(d,{date:d,imp:0,spend:0,compl:0,acts:0});
+  const days=[...dayMap.values()].sort((x,y)=>y.date.localeCompare(x.date)).slice(0,60);
+  return <div>
+    <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:12}}>
+      <div style={{display:"flex",border:`1px solid ${C.border}`,borderRadius:6,overflow:"hidden"}}>
+        {[["all","All history"],["range","Dashboard date range"]].map(([id,l])=>
+          <button key={id} onClick={()=>setRkRange(id)} style={{background:rkRange===id?C.accent:"transparent",color:rkRange===id?C.accentFg:C.sub,border:"none",padding:"5px 14px",fontSize:11,fontWeight:700,cursor:"pointer"}}>{l}</button>)}
+      </div>
+      <span style={{fontSize:11,color:C.dim}}>{rkRange==="all"?"Showing everything mirrored from Roku":"Filtered to the date range above"}</span>
+    </div>
+    <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}}>
+      <KPI label="Live / scheduled" value={String(live.length)} color={C.green}/>
+      <KPI label="Booked budget (those)" value={fmt$(live.reduce((t,r)=>t+Number(r.c.budget||0),0))} color={C.accent}/>
+      <KPI label="Spend (range)" value={fmt$(rs.spend)} color={C.amber}/>
+      <KPI label="Impressions (range)" value={rs.imp.toLocaleString()} color={C.purple}/>
+      <KPI label="Video completes" value={rs.compl.toLocaleString()} color={C.teal}/>
+      <KPI label="Roku conversions" value={String(rs.acts)} color={C.green} sub="Roku-attributed actions"/>
+      {(()=>{const rev=(callgridCalls||[]).filter(cl=>cl.tv_creative_id&&(rokuTvSet.size?rokuTvSet.has(cl.tv_creative_id):true)&&deliveredDays.has(String(cl.date||"").slice(0,10))&&inRange(String(cl.date||"").slice(0,10))).reduce((t,cl)=>t+Number(cl.revenue||0),0);
+        const net=rev-rs.spend;
+        return <React.Fragment>
+          <KPI label="Call revenue" value={fmt$(rev)} color={C.green} sub="TFN-attributed calls"/>
+          <KPI label="Net P/L" value={fmt$(net)} color={net>=0?C.green:C.red} sub="revenue minus Roku spend"/>
+        </React.Fragment>;})()}
+    </div>
+    <div style={{...card,marginBottom:16,overflowX:"auto"}}>
+      <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:10}}>Booking outlook</div>
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:950}}>
+        <thead><tr><th style={th}>Campaign</th><th style={th}>Status</th><th style={th}>Flight</th><th style={thR}>Budget</th><th style={thR}>Spent</th><th style={thR}>Pacing</th><th style={thR}>Impressions</th><th style={thR}>Call revenue</th><th style={thR}>Net</th><th style={thR}>Conv.</th><th style={thR}>CPA</th></tr></thead>
+        <tbody>
+        {rows.map(r=>{const c=r.c;
+          const spotSet=new Set(spotsOf(c));
+          const myDays=campDays.get(c.uid)||new Set();
+          const flightCalls=spotSet.size?(callgridCalls||[]).filter(cl=>spotSet.has(cl.tv_creative_id)&&myDays.has(String(cl.date||"").slice(0,10))):[];
+          const callRev=flightCalls.reduce((t,cl)=>t+Number(cl.revenue||0),0);
+          const net=callRev-r.spent;
+          return <tr key={c.uid}>
+          <td style={{...td,fontWeight:700,maxWidth:260}}>{c.name}<div style={{fontSize:10,color:C.dim,fontWeight:400}}>{c.objective||""}</div></td>
+          <td style={td}><span style={{fontSize:10.5,fontWeight:700,color:r.color}}>{r.label}</span></td>
+          <td style={{...td,...mono,fontSize:11,whiteSpace:"nowrap"}}>{c.start_date||"?"} → {c.end_date||"?"}</td>
+          <td style={tdR}>{c.budget!=null?fmt$(c.budget):"—"}</td>
+          <td style={{...tdR,color:C.amber}}>{r.spent?fmt$(r.spent):"—"}</td>
+          <td style={{...tdR,color:r.pace==null?C.dim:r.pace<0.8?C.amber:r.pace>1.15?C.red:C.green}}>{r.pace==null?"—":`${Math.round(r.pace*100)}%`}</td>
+          <td style={tdR}>{r.imp?r.imp.toLocaleString():"—"}</td>
+          <td style={{...tdR,color:callRev>0?C.green:C.dim}} title={spotSet.size?"TFN-attributed call revenue within the flight (spots from the creative report)":"No spots identified yet — the creative report maps them automatically"}>{spotSet.size?fmt$(callRev):"—"}</td>
+          <td style={{...tdR,fontWeight:700,color:!spotSet.size?C.dim:net>=0?C.green:C.red}}>{spotSet.size?fmt$(net):"—"}</td>
+          <td style={tdR}>{r.acts||"—"}</td>
+          <td style={tdR}>{r.acts?fmt$(r.spent/r.acts):"—"}</td>
+        </tr>;})}
+        </tbody>
+      </table>
+      <div style={{fontSize:11,color:C.dim,marginTop:8}}>Revenue and Net flow through each campaign's paired creative (TFN-attributed calls within the flight). Pacing compares spend to date against the flight's even-daily budget: green on pace, amber under 80%, red over 115%. Mirrored hourly from Roku; Roku conversions are Roku's own attribution (pixel/event based), separate from call counts.</div>
+    </div>
+    <div style={{...card,marginBottom:16,overflowX:"auto"}}>
+      <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:10}}>ROI by campaign — Roku spend vs TFN-attributed calls</div>
+      {(()=>{
+        const paired=rows.filter(r=>spotsOf(r.c).length);
+        if(!paired.length)return <div style={{fontSize:12,color:C.dim}}>No campaign has identified spots yet. The creative report maps campaigns to spots automatically on each sync; a manual pairing on TV Media → Traffic also works.</div>;
+        return <table style={{borderCollapse:"collapse",width:"100%",minWidth:1050}}>
+          <thead><tr>{["Campaign","Creative (spot)","Spend","Impr.","Calls","Per 1k impr.","Qualified","CPC","Cost/qual","Call revenue","ROAS","Net","Roku conv."].map((h,i)=><th key={i} style={i<2?{padding:"6px 8px",borderBottom:`2px solid ${C.border}`,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",color:C.sub,textAlign:"left",whiteSpace:"nowrap"}:{padding:"6px 8px",borderBottom:`2px solid ${C.border}`,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",color:C.sub,textAlign:"right",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+          <tbody>
+          {paired.map(r=>{
+            const c=r.c;
+            const rangeSt=(statByCamp.get(c.uid)||[]).filter(x=>inRange(String(x.date)));
+            const spend=rangeSt.reduce((t,x)=>t+Number(x.spend||0),0);
+            const imp=rangeSt.reduce((t,x)=>t+Number(x.impressions||0),0);
+            const acts=rangeSt.reduce((t,x)=>t+Number(x.actions||0),0);
+            const spotSet=new Set(spotsOf(c));
+            const myDays=campDays.get(c.uid)||new Set();
+            const myCalls=(callgridCalls||[]).filter(cl=>{const d=String(cl.date||"").slice(0,10);return spotSet.has(cl.tv_creative_id)&&myDays.has(d)&&inRange(d);});
+            const n=myCalls.length,qual=myCalls.filter(cl=>cl.billable).length;
+            const rev=myCalls.reduce((t,cl)=>t+Number(cl.revenue||0),0);
+            const net=rev-spend;
+            return <tr key={c.uid}>
+              <td style={td}>{c.name}</td>
+              <td style={{...td,fontSize:11,color:C.sub,maxWidth:220}}>{spotsOf(c).map(id=>creativeNames.get(id)||String(id).slice(0,8)).join(", ")}</td>
+              <td style={{...tdR,color:C.amber}}>{spend?fmt$(spend):"—"}</td>
+              <td style={tdR}>{imp?imp.toLocaleString():"—"}</td>
+              <td style={tdR}>{n||"—"}</td>
+              <td style={tdR}>{imp&&n?(n/imp*1000).toFixed(2):"—"}</td>
+              <td style={tdR}>{qual||"—"}</td>
+              <td style={tdR}>{spend&&n?fmt$(spend/n):"—"}</td>
+              <td style={tdR}>{spend&&qual?fmt$(spend/qual):"—"}</td>
+              <td style={{...tdR,color:rev>0?C.green:C.dim}}>{rev?fmt$(rev):"—"}</td>
+              <td style={{...tdR,color:spend?(rev/spend>=1?C.green:C.red):C.dim}}>{spend?`${(rev/spend*100).toFixed(0)}%`:"—"}</td>
+              <td style={{...tdR,color:net>=0?C.green:C.red,fontWeight:700}}>{spend||rev?fmt$(net):"—"}</td>
+              <td style={tdR}>{acts||"—"}</td>
+            </tr>;})}
+          </tbody>
+        </table>;})()}
+      <div style={{fontSize:11,color:C.dim,marginTop:8}}>Calls are allocated to each campaign through its paired creative's TFN (dialed number in CallGrid). Caveat: if a spot's TFN also airs outside Roku, its calls cannot be split by platform — today these TFNs only run on our own Roku buys, so the attribution holds.</div>
+    </div>
+    <div style={{...card,overflowX:"auto"}}>
+      <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:10}}>Daily delivery vs internal CTV calls</div>
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:900}}>
+        <thead><tr><th style={th}>Date</th><th style={thR}>Impressions</th><th style={thR}>Spend</th><th style={thR}>Completes</th><th style={thR}>Roku conv.</th><th style={thR}>Calls (Roku spots)</th><th style={thR}>Billable</th><th style={thR}>Call revenue</th><th style={thR}>Spend / call</th><th style={thR}>Net P/L</th></tr></thead>
+        <tbody>
+        {days.length===0&&<tr><td colSpan={9} style={{...td,color:C.dim}}>No Roku delivery or internal CTV calls in this date range.</td></tr>}
+        {days.map(d=>{const cl=callsByDay.get(d.date)||{n:0,bill:0,rev:0};const raws=callRowsByDay.get(d.date)||[];return <React.Fragment key={d.date}>
+        <tr onClick={()=>raws.length&&setOpenDay(openDay===d.date?null:d.date)} style={{cursor:raws.length?"pointer":"default",background:openDay===d.date?"rgba(255,255,255,0.03)":"transparent"}}>
+          <td style={{...td,...mono,fontSize:11,whiteSpace:"nowrap"}}>{raws.length?<span style={{color:C.accent}}>{openDay===d.date?"▾ ":"▸ "}</span>:null}{d.date}</td>
+          <td style={tdR}>{d.imp?d.imp.toLocaleString():"—"}</td>
+          <td style={{...tdR,color:C.amber}}>{d.spend?fmt$(d.spend):"—"}</td>
+          <td style={tdR}>{d.compl?d.compl.toLocaleString():"—"}</td>
+          <td style={tdR}>{d.acts||"—"}</td>
+          <td style={tdR}>{cl.n||"—"}</td>
+          <td style={tdR}>{cl.bill||"—"}</td>
+          <td style={{...tdR,color:cl.rev>0?C.green:C.dim}}>{cl.rev?fmt$(cl.rev):"—"}</td>
+          <td style={tdR}>{d.spend&&cl.n?fmt$(d.spend/cl.n):"—"}</td>
+          <td style={{...tdR,fontWeight:700,color:(cl.rev-d.spend)>=0?C.green:C.red}}>{d.spend||cl.rev?fmt$(cl.rev-d.spend):"—"}</td>
+        </tr>
+        {openDay===d.date&&(()=>{
+          // group that day's calls by TFN × spot × source — the reuse x-ray
+          const g=new Map();
+          for(const cl2 of raws){
+            const k=`${fmtTfn(cl2.dialed_number)}|${cl2.tv_creative_id||""}|${cl2.publisher_name||"?"}`;
+            let a2=g.get(k);if(!a2){a2={tfn:fmtTfn(cl2.dialed_number),spot:creativeNames.get(cl2.tv_creative_id)||"(unmatched)",src:cl2.publisher_name||"?",camp:cl2.campaign_name||"",n:0,bill:0,rev:0};g.set(k,a2);}
+            a2.n++;if(cl2.billable)a2.bill++;a2.rev+=Number(cl2.revenue||0);
+          }
+          const list=[...g.values()].sort((x,y)=>y.n-x.n);
+          return <tr><td colSpan={10} style={{padding:0,borderBottom:`1px solid ${C.border}`}}>
+            <div style={{padding:"10px 16px 14px 34px",background:"rgba(255,255,255,0.02)"}}>
+              <div style={{fontSize:10,fontWeight:700,color:C.sub,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>TFN breakdown — {d.date} ({raws.length} call{raws.length===1?"":"s"})</div>
+              <table style={{borderCollapse:"collapse",minWidth:760}}>
+                <thead><tr>{["TFN dialed","Spot","CallGrid source","Campaign","Calls","Billable","Revenue"].map((h,i)=><th key={i} style={{padding:"4px 10px",borderBottom:`2px solid ${C.border}`,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",color:C.sub,textAlign:i>=4?"right":"left",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+                <tbody>{list.map((r2,i)=><tr key={i}>
+                  <td style={{...td,...mono,fontSize:11,whiteSpace:"nowrap"}}>{r2.tfn}</td>
+                  <td style={{...td,fontSize:11,maxWidth:230}}>{r2.spot}</td>
+                  <td style={{...td,fontSize:11}}>{r2.src}</td>
+                  <td style={{...td,fontSize:11,color:C.sub}}>{r2.camp}</td>
+                  <td style={tdR}>{r2.n}</td>
+                  <td style={tdR}>{r2.bill}</td>
+                  <td style={{...tdR,color:r2.rev>0?C.green:C.dim}}>{fmt$(r2.rev)}</td>
+                </tr>)}</tbody>
+              </table>
+              <div style={{fontSize:10.5,color:C.dim,marginTop:6}}>Multiple CallGrid sources on one TFN in the same day = that number airing on more than one placement. That is the reuse to untangle: give each platform its own TFN and the split becomes exact.</div>
+            </div>
+          </td></tr>;})()}
+        </React.Fragment>;})}
+        </tbody>
+      </table>
+      <div style={{fontSize:11,color:C.dim,marginTop:8}}>Calls = TFN-attributed calls on Roku-aired spots, counted ONLY on days Roku actually delivered impressions — a day with no delivery gets no Roku calls, since these creatives also air on other placements sharing the same TFNs. On days where Roku and another placement both ran the same spot, the split is unknowable from the TFN and all of that day's calls show here.</div>
+    </div>
+  </div>;
+}
+
+// ── Creative Spot Tracker: per-spot performance for the ad set. Attribution
+// comes from the dialed tracking number (tv_number_assignments windows), so
+// calls before a cutover on previously shared numbers stay unattributed by
+// design. Spend/impressions are manual weekly entries (creative_week_stats);
+// detected conversions (AI "Enrolled") stay separate from confirmed sales
+// (client dispo files matched by caller number). ──
+function SpotTracker({callgridCalls,filterStart,filterEnd}){
+  const dg10=x=>String(x||"").replace(/\D/g,"").slice(-10);
+  const [creatives,setCreatives]=useState(null);
+  const [weekStats,setWeekStats]=useState([]);
+  const [convSet,setConvSet]=useState(new Set());
+  const [salesByPhone,setSalesByPhone]=useState(new Map());
+  const [open,setOpen]=useState(null);
+  const [metaForm,setMetaForm]=useState(null);
+  const [wkForm,setWkForm]=useState(null); // {creative_id,id?,week_start,platform,spend,impressions,notes}
+  const [busy,setBusy]=useState(false);
+  const [numbers,setNumbers]=useState([]);
+  const [assigns,setAssigns]=useState([]);
+  const [rokuPair,setRokuPair]=useState(new Map()); // roku campaign uid -> creative id
+  const [rokuStats,setRokuStats]=useState([]);
+  const [rokuCr,setRokuCr]=useState([]); // creative-level report rows (auto TFN-matched)
+  const [cutDate,setCutDate]=useState(new Date().toISOString().slice(0,10));
+  const load=React.useCallback(async()=>{
+    try{
+      const [cr,ws,cv,dl,pn,asg,rkc,rks,rkx]=await Promise.all([
+        sbAll("tv_creatives?select=*&order=name"),
+        sbAll("creative_week_stats?select=*&order=week_start.desc").catch(()=>[]),
+        sbAll("call_analysis?conversion=is.true&status=eq.ANALYSED&select=inbound_call_id").catch(()=>[]),
+        sbAll("dispo_leads?sales=gt.0&select=phone,sales").catch(()=>[]),
+        sbAll("tv_phone_numbers?select=id,number").catch(()=>[]),
+        sbAll("tv_number_assignments?select=id,phone_number_id,creative_id,valid_from,valid_to").catch(()=>[]),
+        sbAll("roku_campaigns?select=uid,linked_creative_id").catch(()=>[]),
+        sbAll("roku_daily_stats?select=campaign_uid,date,spend,impressions").catch(()=>[]),
+        sbAll("roku_creative_stats?select=date,spend,impressions,tv_creative_id").catch(()=>[]),
+      ]);
+      setCreatives(cr||[]);setNumbers(pn||[]);setAssigns(asg||[]);
+      setRokuPair(new Map((rkc||[]).filter(x=>x.linked_creative_id).map(x=>[x.uid,x.linked_creative_id])));
+      setRokuStats(rks||[]);setRokuCr(rkx||[]);
+      setWeekStats(ws||[]);
+      setConvSet(new Set((cv||[]).map(r=>String(r.inbound_call_id))));
+      const m=new Map();
+      for(const l of (dl||[])){const p=dg10(l.phone);if(p)m.set(p,(m.get(p)||0)+Number(l.sales||0));}
+      setSalesByPhone(m);
+    }catch(e){setCreatives([]);}
+  },[]);
+  useEffect(()=>{load();},[load]);
+  const inRange=d=>(!filterStart||d>=filterStart)&&(!filterEnd||d<=filterEnd);
+  const rows=React.useMemo(()=>{
+    if(!creatives)return [];
+    const byCreative=new Map();
+    for(const c of callgridCalls){
+      if(!c.tv_creative_id||!inRange(String(c.date||"")))continue;
+      let a=byCreative.get(c.tv_creative_id);
+      if(!a){a={calls:0,qual:0,rev:0,conv:0,phones:new Set()};byCreative.set(c.tv_creative_id,a);}
+      a.calls++;if(c.billable)a.qual++;a.rev+=Number(c.revenue||0);
+      if(convSet.has(String(c.inbound_call_id)))a.conv++;
+      const p=dg10(c.caller_id);if(p)a.phones.add(p);
+    }
+    return creatives.filter(c=>c.status!=="archived").map(c=>{
+      const a=byCreative.get(c.id)||{calls:0,qual:0,rev:0,conv:0,phones:new Set()};
+      let confirmed=0;for(const p of a.phones)confirmed+=salesByPhone.get(p)||0;
+      const wk=weekStats.filter(w=>w.creative_id===c.id&&inRange(String(w.week_start||"")));
+      const manualSpend=wk.reduce((t,w)=>t+Number(w.spend||0),0);
+      const manualImpr=wk.reduce((t,w)=>t+Number(w.impressions||0),0);
+      // Roku spend/impressions: creative-level report rows match this spot by
+      // the TFN in the creative filename (automatic); the campaign pairing is
+      // only the fallback before the first report lands
+      let rokuSpend=0,rokuImpr=0;
+      if(rokuCr.length){
+        for(const r of rokuCr){
+          if(r.tv_creative_id!==c.id||!inRange(String(r.date)))continue;
+          rokuSpend+=Number(r.spend||0);rokuImpr+=Number(r.impressions||0);
+        }
+      }else{
+        for(const r of rokuStats){
+          if(rokuPair.get(r.campaign_uid)!==c.id||!inRange(String(r.date)))continue;
+          rokuSpend+=Number(r.spend||0);rokuImpr+=Number(r.impressions||0);
+        }
+      }
+      const spend=manualSpend+rokuSpend,impr=manualImpr+rokuImpr;
+      return {c,calls:a.calls,qual:a.qual,rev:a.rev,conv:a.conv,confirmed,spend,impr,wk,
+        manualSpend,rokuSpend,
+        profit:a.rev-spend,cpc:a.calls?spend/a.calls:0,rpc:a.calls?a.rev/a.calls:0,
+        cpa:confirmed?spend/confirmed:0};
+    }).sort((x,y)=>y.calls-x.calls||String(x.c.name||"").localeCompare(String(y.c.name||"")));
+  },[creatives,callgridCalls,convSet,salesByPhone,weekStats,rokuPair,rokuStats,rokuCr,filterStart,filterEnd]);
+  async function saveMeta(){
+    if(!metaForm)return;setBusy(true);
+    try{
+      const {id,...pf}=metaForm;
+      await sb("PATCH",`tv_creatives?id=eq.${id}`,{drive_file_id:pf.drive_file_id||null,old_name:pf.old_name||null,assigned_phone:pf.assigned_phone||null,live_date:pf.live_date||null,name:pf.name});
+      setMetaForm(null);load();
+    }catch(e){alert(e.message);}
+    setBusy(false);
+  }
+  async function saveWeek(){
+    if(!wkForm||!wkForm.week_start)return;setBusy(true);
+    try{
+      const pf={creative_id:wkForm.creative_id,week_start:wkForm.week_start,platform:wkForm.platform||null,
+        spend:wkForm.spend===""?null:Number(wkForm.spend),impressions:wkForm.impressions===""?null:Number(wkForm.impressions),
+        notes:wkForm.notes||null,updated_at:new Date().toISOString()};
+      if(wkForm.id)await sb("PATCH",`creative_week_stats?id=eq.${wkForm.id}`,pf);
+      else await sb("POST","creative_week_stats",pf);
+      setWkForm(null);load();
+    }catch(e){alert(e.message);}
+    setBusy(false);
+  }
+  const numFor=c=>{
+    const dg=x=>String(x||"").replace(/\D/g,"");
+    const want=dg(c.assigned_phone);
+    return numbers.find(n=>{const nd=dg(n.number);return nd===want||nd==="1"+want||"1"+nd===want;})||null;
+  };
+  const hasAssign=c=>{const pn=numFor(c);return !!pn&&assigns.some(a=>a.phone_number_id===pn.id&&a.creative_id===c.id);};
+  const awaitingCutover=(creatives||[]).filter(c=>c.status!=="archived"&&c.assigned_phone&&!c.live_date);
+  async function recordCutover(){
+    if(!awaitingCutover.length||!cutDate)return;
+    if(!confirm(`Record ${cutDate} as the live date for ${awaitingCutover.length} spot${awaitingCutover.length===1?"":"s"}? Spots on new or previously shared numbers start attributing calls from that date.`))return;
+    setBusy(true);
+    try{
+      for(const c of awaitingCutover){
+        const pn=numFor(c);
+        if(pn&&!hasAssign(c)){
+          await sb("POST","tv_number_assignments",{phone_number_id:pn.id,creative_id:c.id,network_id:null,tv_campaign_id:null,valid_from:cutDate,valid_to:null});
+        }
+        await sb("PATCH",`tv_creatives?id=eq.${c.id}`,{live_date:cutDate});
+      }
+      await load();
+      alert("Cutover recorded. Calls from that date forward attribute to the new assignments on the next sync; if the date is in the past, re-run a sync slice to backfill.");
+    }catch(e){alert(`Cutover failed: ${e?.message||e}`);}
+    setBusy(false);
+  }
+  const td={padding:"7px 8px",borderBottom:`1px solid ${C.border}`,fontSize:12,color:C.text,verticalAlign:"top"};
+  const tdR={...td,textAlign:"right",...mono};
+  const th={padding:"6px 8px",borderBottom:`2px solid ${C.border}`,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",color:C.sub,textAlign:"left",whiteSpace:"nowrap"};
+  const thR={...th,textAlign:"right"};
+  const fmtN=n=>n?Number(n).toLocaleString():"—";
+  if(creatives===null)return <div style={{color:C.sub,fontSize:13}}>Loading spots…</div>;
+  if(!creatives.length)return <div style={{...card,textAlign:"center",color:C.sub,padding:40}}>No spots yet — run the creative tracker migration first.</div>;
+  const tot=rows.reduce((t,r)=>{t.spend+=r.spend;t.calls+=r.calls;t.qual+=r.qual;t.rev+=r.rev;t.conv+=r.conv;t.confirmed+=r.confirmed;return t;},{spend:0,calls:0,qual:0,rev:0,conv:0,confirmed:0});
+  return <div>
+    <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}}>
+      <KPI label="Spend (Roku + entered)" value={fmt$(tot.spend)} color={C.amber}/>
+      <KPI label="Profit" value={fmt$(tot.rev-tot.spend)} color={tot.rev-tot.spend>=0?C.green:C.red} sub="call revenue minus spend"/>
+      <KPI label="Calls" value={tot.calls.toLocaleString()} color={C.purple}/>
+      <KPI label="Qualified" value={tot.qual.toLocaleString()} color={C.teal}/>
+      <KPI label="Revenue" value={fmt$(tot.rev)} color={C.green}/>
+      <KPI label="Detected conv." value={String(tot.conv)} color={C.accent} sub="AI-tagged Enrolled"/>
+      <KPI label="Confirmed sales" value={String(tot.confirmed)} color={C.green} sub="from client dispo files"/>
+    </div>
+    {awaitingCutover.length>0&&<div style={{border:`1px solid ${C.amber}66`,background:"rgba(255,180,60,0.08)",borderRadius:10,padding:"12px 16px",marginBottom:14,display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+      <div style={{fontSize:12.5,color:C.text,flex:"1 1 320px"}}>
+        <b>{awaitingCutover.length} spot{awaitingCutover.length===1?"":"s"} awaiting cutover.</b> The day the revised spots go live, record it here — it stamps the version live date and switches the new and previously shared numbers to their spots. No SQL needed.
+      </div>
+      <input type="date" value={cutDate} onChange={e=>setCutDate(e.target.value)} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,color:C.text,padding:"6px 10px",fontSize:12}}/>
+      <Btn onClick={recordCutover} disabled={busy} style={{fontSize:12,padding:"7px 16px"}}>{busy?"Recording…":"Record cutover"}</Btn>
+    </div>}
+    <div style={{fontSize:11,color:C.dim,marginBottom:10}}>
+      Calls attribute by the dialed tracking number. Before the cutover date, calls to 1-888-784-8026 and 1-888-775-3906 are deliberately unattributed — the number was shared by two spots. Detected conversions are the AI's read; confirmed sales come from the client's disposition files, matched by caller number. Click a spot to edit its details or enter weekly spend and impressions.
+    </div>
+    <div style={{...card,overflowX:"auto"}}>
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:1150}}>
+        <thead><tr><th style={th}>Spot</th><th style={th}>Phone</th><th style={th}>Live</th><th style={thR}>Spend</th><th style={thR}>Impr.</th><th style={thR}>Calls</th><th style={thR}>Qual.</th><th style={thR}>Revenue</th><th style={thR}>CPC</th><th style={thR}>Rev/Call</th><th style={thR}>Det. conv</th><th style={thR}>Conf. sales</th><th style={thR}>CPA (conf.)</th><th style={thR}>Profit</th></tr></thead>
+        <tbody>
+        {rows.map(r=>{const c=r.c;return <React.Fragment key={c.id}>
+        <tr onClick={()=>setOpen(open===c.id?null:c.id)} style={{cursor:"pointer",background:open===c.id?`${C.accent}12`:"transparent"}}>
+          <td style={{...td,fontWeight:700,maxWidth:280}}>
+            {open===c.id?"▾ ":"▸ "}{c.name}
+            <div style={{fontSize:10,color:C.dim,fontWeight:400}}>{c.old_name||""} {c.drive_file_id&&<a href={`https://drive.google.com/file/d/${c.drive_file_id}/view`} target="_blank" rel="noreferrer" onClick={e=>e.stopPropagation()} style={{color:C.teal}}>📄 Drive</a>}</div>
+          </td>
+          <td style={{...td,...mono,fontSize:11,whiteSpace:"nowrap"}}>{c.assigned_phone||"—"}</td>
+          <td style={{...td,fontSize:11,color:c.live_date?C.text:C.dim}}>{c.live_date||"—"}</td>
+          <td style={{...tdR,color:C.amber}} title={r.spend?`Roku auto: ${fmt$(r.rokuSpend)} · entered: ${fmt$(r.manualSpend)}`:undefined}>{r.spend?fmt$(r.spend):"—"}{r.rokuSpend>0&&<span style={{fontSize:9,color:"#9146ff",fontWeight:800}}> R</span>}</td>
+          <td style={tdR}>{fmtN(r.impr)}</td>
+          <td style={tdR}>{r.calls.toLocaleString()}</td>
+          <td style={tdR}>{r.qual.toLocaleString()}</td>
+          <td style={{...tdR,color:C.green}}>{fmt$(r.rev)}</td>
+          <td style={tdR}>{r.cpc?fmt$(r.cpc):"—"}</td>
+          <td style={tdR}>{r.calls?fmt$(r.rpc):"—"}</td>
+          <td style={{...tdR,color:r.conv?C.accent:C.dim}}>{r.conv||"—"}</td>
+          <td style={{...tdR,color:r.confirmed?C.green:C.dim}}>{r.confirmed||"—"}</td>
+          <td style={tdR}>{r.cpa?fmt$(r.cpa):"—"}</td>
+          <td style={{...tdR,color:r.profit>=0?C.accent:C.red}}>{r.spend||r.rev?fmt$(r.profit):"—"}</td>
+        </tr>
+        {open===c.id&&<tr><td colSpan={14} style={{padding:"12px 16px 16px",borderBottom:`1px solid ${C.border}`,background:"rgba(255,255,255,0.02)"}}>
+          <div style={{display:"flex",gap:24,flexWrap:"wrap"}}>
+            <div style={{flex:"1 1 300px",minWidth:280}}>
+              <div style={{fontSize:10,fontWeight:800,color:C.sub,letterSpacing:"0.05em",marginBottom:8}}>SPOT DETAILS</div>
+              {metaForm&&metaForm.id===c.id
+                ?<div>
+                  {[["name","Theme / name"],["old_name","Old spot name"],["assigned_phone","Assigned phone"],["drive_file_id","Drive file ID"]].map(([k,l])=><div key={k} style={{marginBottom:8}}>
+                    <div style={{fontSize:10,color:C.sub,marginBottom:2}}>{l}</div>
+                    <Input value={metaForm[k]||""} onChange={e=>setMetaForm(f=>({...f,[k]:e.target.value}))}/>
+                  </div>)}
+                  <div style={{marginBottom:10}}>
+                    <div style={{fontSize:10,color:C.sub,marginBottom:2}}>Live / cutover date</div>
+                    <Input type="date" value={metaForm.live_date||""} onChange={e=>setMetaForm(f=>({...f,live_date:e.target.value}))}/>
+                  </div>
+                  <div style={{display:"flex",gap:8}}>
+                    <Btn onClick={saveMeta} disabled={busy} style={{fontSize:12,padding:"5px 14px"}}>{busy?"Saving…":"Save"}</Btn>
+                    <Btn outline color={C.sub} onClick={()=>setMetaForm(null)} style={{fontSize:12,padding:"5px 14px"}}>Cancel</Btn>
+                  </div>
+                </div>
+                :<div style={{fontSize:12,color:C.sub,lineHeight:1.8}}>
+                  Filename: <span style={{color:C.text}}>{c.name} - {c.assigned_phone||"?"}.mp4</span><br/>
+                  Old name: <span style={{color:C.text}}>{c.old_name||"—"}</span><br/>
+                  Drive file ID: <span style={{color:C.text,...mono,fontSize:11}}>{c.drive_file_id||"—"}</span><br/>
+                  Live / cutover: <span style={{color:C.text}}>{c.live_date||"not yet recorded"}</span><br/>
+                  <Btn outline onClick={()=>setMetaForm({id:c.id,name:c.name||"",old_name:c.old_name||"",assigned_phone:c.assigned_phone||"",drive_file_id:c.drive_file_id||"",live_date:c.live_date||""})} style={{fontSize:12,padding:"5px 14px",marginTop:6}}>✎ Edit details</Btn>
+                </div>}
+            </div>
+            <div style={{flex:"2 1 420px",minWidth:360}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <div style={{fontSize:10,fontWeight:800,color:C.sub,letterSpacing:"0.05em"}}>WEEKLY SPEND & IMPRESSIONS</div>
+                <Btn outline onClick={()=>setWkForm({creative_id:c.id,week_start:"",platform:"",spend:"",impressions:"",notes:""})} style={{fontSize:11,padding:"3px 10px"}}>+ Add week</Btn>
+              </div>
+              {wkForm&&wkForm.creative_id===c.id&&<div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end",marginBottom:10,padding:"10px",border:`1px solid ${C.border}`,borderRadius:8}}>
+                <Field label="Week of"><Input type="date" value={wkForm.week_start} onChange={e=>setWkForm(f=>({...f,week_start:e.target.value}))}/></Field>
+                <Field label="Platform"><Input value={wkForm.platform} onChange={e=>setWkForm(f=>({...f,platform:e.target.value}))} placeholder="CTV / Linear / YT…"/></Field>
+                <Field label="Spend $"><Input type="number" value={wkForm.spend} onChange={e=>setWkForm(f=>({...f,spend:e.target.value}))}/></Field>
+                <Field label="Impressions"><Input type="number" value={wkForm.impressions} onChange={e=>setWkForm(f=>({...f,impressions:e.target.value}))}/></Field>
+                <Btn onClick={saveWeek} disabled={busy||!wkForm.week_start} style={{fontSize:12,padding:"6px 14px"}}>{busy?"…":"Save"}</Btn>
+                <Btn outline color={C.sub} onClick={()=>setWkForm(null)} style={{fontSize:12,padding:"6px 14px"}}>Cancel</Btn>
+              </div>}
+              <table style={{borderCollapse:"collapse",width:"100%"}}>
+                <thead><tr><th style={th}>Week of</th><th style={th}>Platform</th><th style={thR}>Spend</th><th style={thR}>Impressions</th><th style={th}></th></tr></thead>
+                <tbody>
+                {r.wk.length===0&&<tr><td colSpan={5} style={{...td,color:C.dim}}>No weekly entries in this date range yet.</td></tr>}
+                {r.wk.map(w=><tr key={w.id}>
+                  <td style={{...td,...mono,fontSize:11}}>{w.week_start}</td>
+                  <td style={{...td,fontSize:11}}>{w.platform||"—"}</td>
+                  <td style={{...tdR,color:C.amber}}>{w.spend!=null?fmt$(w.spend):"—"}</td>
+                  <td style={tdR}>{fmtN(w.impressions)}</td>
+                  <td style={td}><button onClick={()=>setWkForm({id:w.id,creative_id:c.id,week_start:w.week_start,platform:w.platform||"",spend:w.spend??"",impressions:w.impressions??"",notes:w.notes||""})} style={{background:"none",border:"none",color:C.accent,cursor:"pointer",fontSize:11}}>✎</button></td>
+                </tr>)}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </td></tr>}
+        </React.Fragment>;})}
+        </tbody>
+      </table>
+    </div>
+  </div>;
+}
 function TVActualsView({callgridCalls,tvBookings,tvCampaigns,tvCreatives,networks,filterStart,filterEnd,setFilterStart,setFilterEnd}) {
+  const [tvSub,setTvSub]=usePersistentState("acttv_sub","summary");
   const [summaryGroup,setSummaryGroup]=usePersistentState("acttv_summary_group","network");
   const [drillDown,setDrillDown]=useState(null);
+  // Roku spend joins the summary through the campaign→creative pairing
+  const [rokuPairTV,setRokuPairTV]=useState(new Map());
+  const [rokuStatsTV,setRokuStatsTV]=useState([]);
+  const [rokuCrTV,setRokuCrTV]=useState([]);
+  useEffect(()=>{(async()=>{
+    try{
+      const [rc,rs,rx]=await Promise.all([
+        sbAll("roku_campaigns?select=uid,linked_creative_id").catch(()=>[]),
+        sbAll("roku_daily_stats?select=campaign_uid,date,spend").catch(()=>[]),
+        sbAll("roku_creative_stats?select=date,spend,tv_creative_id").catch(()=>[]),
+      ]);
+      setRokuPairTV(new Map((rc||[]).filter(x=>x.linked_creative_id).map(x=>[x.uid,x.linked_creative_id])));
+      setRokuStatsTV(rs||[]);setRokuCrTV(rx||[]);
+    }catch(e){/* roku not set up yet */}
+  })();},[]);
+  const rokuByCreative=React.useMemo(()=>{
+    const m=new Map();let total=0;
+    if(rokuCrTV.length){
+      for(const r of rokuCrTV){
+        const d=String(r.date);
+        if(filterStart&&d<filterStart)continue;
+        if(filterEnd&&d>filterEnd)continue;
+        const v=Number(r.spend||0);total+=v;
+        if(r.tv_creative_id)m.set(r.tv_creative_id,(m.get(r.tv_creative_id)||0)+v);
+      }
+    }else{
+      for(const r of rokuStatsTV){
+        const d=String(r.date);
+        if(filterStart&&d<filterStart)continue;
+        if(filterEnd&&d>filterEnd)continue;
+        const cr=rokuPairTV.get(r.campaign_uid);
+        const v=Number(r.spend||0);total+=v;
+        if(cr)m.set(cr,(m.get(cr)||0)+v);
+      }
+    }
+    return {m,total};
+  },[rokuPairTV,rokuStatsTV,rokuCrTV,filterStart,filterEnd]);
   const tvCalls=callgridCalls.filter(c=>c.is_tv_call);
   const filtered=tvCalls.filter(c=>(!filterStart||c.date>=filterStart)&&(!filterEnd||c.date<=filterEnd));
   function getNetworkName(id){return networks.find(n=>n.id===id)?.name||"Unknown";}
@@ -8820,7 +9584,7 @@ function TVActualsView({callgridCalls,tvBookings,tvCampaigns,tvCreatives,network
     const map={};
     filtered.forEach(c=>{
       let key,label;
-      if(groupKey==="network"){key=c.tv_network_id||"unknown";label=getNetworkName(key);}
+      if(groupKey==="network"){key=c.tv_network_id||"unknown";label=key==="unknown"?"Internal CTV (Roku)":getNetworkName(key);}
       else if(groupKey==="creative"){key=c.tv_creative_id||"unknown";label=getCreativeName(key);}
       else if(groupKey==="campaign"){key=c.tv_campaign_id||"unknown";label=getCampaignName(key);}
       else if(groupKey==="date"){key=c.date;label=c.date;}
@@ -8831,14 +9595,18 @@ function TVActualsView({callgridCalls,tvBookings,tvCampaigns,tvCreatives,network
       if(c.date)map[key].days.add(c.date);
     });
     return Object.values(map).map(r=>{
-      const spend=groupKey==="date"?0:getSpend(groupKey,r.key);
+      let spend=groupKey==="date"?0:getSpend(groupKey,r.key);
+      // Roku spend: per creative via the pairing; the whole pot on the
+      // internal-CTV network row (TFN calls with no linear network)
+      if(groupKey==="creative")spend+=rokuByCreative.m.get(r.key)||0;
+      if(groupKey==="network"&&r.key==="unknown")spend+=rokuByCreative.total;
       return{...r,days:r.days.size,spend,profit:r.revenue-spend,cpc:r.calls>0?spend/r.calls:0,rpc:r.calls>0?r.revenue/r.calls:0,margin:r.revenue>0?(((r.revenue-spend)/r.revenue)*100).toFixed(1)+"%":"—"};
     }).sort((a,b)=>b.calls-a.calls);
   }
   const summaryData=buildSummary(summaryGroup);
   const totalCalls=filtered.length;
   const totalRev=filtered.reduce((s,c)=>s+(c.revenue||0),0);
-  const totalSpend=tvBookings.filter(b=>(!filterStart||b.week_start>=filterStart)&&(!filterEnd||b.week_start<=filterEnd)).reduce((s,b)=>s+(b.net_aired||0),0);
+  const totalSpend=tvBookings.filter(b=>(!filterStart||b.week_start>=filterStart)&&(!filterEnd||b.week_start<=filterEnd)).reduce((s,b)=>s+(b.net_aired||0),0)+rokuByCreative.total;
   const totalProfit=totalRev-totalSpend;
   const drillRows=drillDown?filtered.filter(c=>{
     if(drillDown.type==="network")return c.tv_network_id===drillDown.key;
@@ -8854,11 +9622,18 @@ function TVActualsView({callgridCalls,tvBookings,tvCampaigns,tvCreatives,network
       <Field label="To"><Input type="date" value={filterEnd} onChange={e=>setFilterEnd(e.target.value)}/></Field>
       {(filterStart||filterEnd)&&<button onClick={()=>{setFilterStart("");setFilterEnd("");}} style={{background:"none",border:`1px solid ${C.red}`,borderRadius:5,color:C.red,cursor:"pointer",fontSize:12,padding:"5px 10px",marginBottom:2}}>Clear</button>}
     </div>
+    <div style={{display:"flex",gap:6,marginBottom:16}}>
+      {[["summary","Summary"],["spots","Spot Tracker"],...(FEATURES.roku?[["roku","Roku"]]:[])].map(([id,l])=>
+        <button key={id} onClick={()=>setTvSub(id)} style={{padding:"7px 16px",borderRadius:8,border:`1px solid ${tvSub===id?C.accent:C.border}`,background:tvSub===id?C.accent:"transparent",color:tvSub===id?C.accentFg:C.sub,fontWeight:600,fontSize:12,cursor:"pointer"}}>{l}</button>)}
+    </div>
+    {tvSub==="spots"&&<SpotTracker callgridCalls={callgridCalls} filterStart={filterStart} filterEnd={filterEnd}/>}
+    {FEATURES.roku&&tvSub==="roku"&&<RokuView callgridCalls={callgridCalls} filterStart={filterStart} filterEnd={filterEnd}/>}
+    {tvSub==="summary"&&<React.Fragment>
     {/* KPI tiles */}
     <div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"}}>
       <KPI label="TV Calls" value={totalCalls.toLocaleString()} color={C.purple}/>
       <KPI label="TV Revenue" value={fmt$(totalRev)} color={C.green}/>
-      <KPI label="Net Spend (85%)" value={fmt$(totalSpend)} color={C.amber}/>
+      <KPI label="Net Spend" value={fmt$(totalSpend)} color={C.amber} sub={rokuByCreative.total?`incl. ${fmt$(rokuByCreative.total)} Roku`:""}/>
       <KPI label="TV Profit" value={fmt$(totalProfit)} color={totalProfit>=0?C.accent:C.red} sub={totalRev>0?`${((totalProfit/totalRev)*100).toFixed(1)}% margin`:""}/>
       <KPI label="CPC" value={totalCalls>0?fmt$(totalSpend/totalCalls):"—"} color={C.orange}/>
       <KPI label="Rev/Call" value={totalCalls>0?fmt$(totalRev/totalCalls):"—"} color={C.teal}/>
@@ -8900,6 +9675,7 @@ function TVActualsView({callgridCalls,tvBookings,tvCampaigns,tvCreatives,network
         {key:"payout",label:"Payout",right:true,render:v=><span style={{...mono,color:C.amber}}>{fmt$(v)}</span>},
       ]} rows={drillRows} emptyMsg="No calls."/>
     </Modal>}
+    </React.Fragment>}
   </div>;
 }
 function Actuals({actuals,pubActuals,callgridCalls,clients,publishers,clientCampaigns,publisherCampaigns,campaignLinks,onRefresh,callgridConfig,onSaveCallGridConfig,globalFilters,tvBookings,tvCampaigns,tvCreatives,networks}) {
@@ -8923,6 +9699,20 @@ function Actuals({actuals,pubActuals,callgridCalls,clients,publishers,clientCamp
   const [chartMetric,setChartMetric]=usePersistentState("act_chart_metric","revenue");
   const [chartGroup,setChartGroup]=usePersistentState("act_chart_group","daily");
   const [chartDays,setChartDays]=usePersistentState("act_chart_days",30);
+  // ── Ping/bid rollups (buyer-side pings, pub-side bids) for charts + tables ──
+  const [pingDaily,setPingDaily]=useState(null);
+  const [bidDaily,setBidDaily]=useState(null);
+  useEffect(()=>{let dead=false;(async()=>{
+    try{
+      const d=new Date();d.setDate(d.getDate()-120);
+      const since=d.toISOString().slice(0,10);
+      const [pg,bd]=await Promise.all([
+        sbAll(`ping_daily_stats?date=gte.${since}&select=date,destination_name,total_pings,accepted`),
+        sbAll(`bid_daily_stats?date=gte.${since}&select=date,source_name,total_pings,bids,won`),
+      ]);
+      if(!dead){setPingDaily(pg||[]);setBidDaily(bd||[]);}
+    }catch(e){if(!dead){setPingDaily([]);setBidDaily([]);}}
+  })();return()=>{dead=true;};},[]);
   const [showFilters,setShowFilters]=useState(false);
   const [filterSource,setFilterSource]=usePersistentState("act_filter_source","all"); // all | callgrid | manual
   const [showCallDetail,setShowCallDetail]=useState(false);
@@ -9027,16 +9817,24 @@ function Actuals({actuals,pubActuals,callgridCalls,clients,publishers,clientCamp
       else if(groupKey==="publisher")key=c.publisher||"—";
       else if(groupKey==="client")key=c.client||"—";
       else key=c.date||"—"; // "date" and any fallback
-      if(!map[key])map[key]={key,calls:0,bill:0,revenue:0,payout:0};
-      if(isConnCall(c))map[key].calls+=1;
-      if(isBillCall(c))map[key].bill+=1;
-      map[key].revenue+=(c.revenue||0);
-      map[key].payout+=(c.payout||0);
+      if(!map[key])map[key]={key,inc:0,calls:0,bill:0,noconn:0,line:0,revenue:0,payout:0,dur:0};
+      const m=map[key];
+      m.inc+=1;
+      const conn=isConnCall(c);
+      if(conn){m.calls+=1;m.dur+=Number(c.call_length_seconds||0);}
+      else m.noconn+=1;
+      if(["BUSY","NO_ANSWER","NO_ROUTE","NO_ROUTE_TAGS"].includes(String(c.call_status||"")))m.line+=1;
+      if(isBillCall(c))m.bill+=1;
+      m.revenue+=(c.revenue||0);
+      m.payout+=(c.payout||0);
     });
     const result=Object.values(map).map(r=>({...r,profit:r.revenue-r.payout}));
     if(groupKey==="date")return result.sort((a,b)=>String(b.key).localeCompare(String(a.key)));
     return result.sort((a,b)=>b.revenue-a.revenue);
   }
+  const hmsFmt=sec=>{const n=Math.max(0,Math.round(Number(sec)||0));
+    const h=Math.floor(n/3600),m=Math.floor(n%3600/60),x=n%60;
+    return `${h?h+":":""}${String(m).padStart(h?2:1,"0")}:${String(x).padStart(2,"0")}`;};
   const callSummaryData=buildCallSummary(callDetailGroup);
   const callDrillRows=callDrillDown?filteredCallGridCalls.filter(c=>{
     if(callDrillDown.type==="date")return (c.date||"—")===callDrillDown.value;
@@ -9100,6 +9898,47 @@ function Actuals({actuals,pubActuals,callgridCalls,clients,publishers,clientCamp
     });
     return rows.sort((a,b)=>(b.date||"").localeCompare(a.date||""));
   }
+  // ── Ping data mapped into the same client/publisher space as actuals ──
+  const monOfA=ds=>{try{const d=parseLocalDate(String(ds).slice(0,10));const off=(d.getDay()+6)%7;d.setDate(d.getDate()-off);return toDateStr(d);}catch{return String(ds).slice(0,10);}};
+  const monthKeyA=ds=>String(ds).slice(0,7);
+  const monthLabelA=k=>{try{return parseLocalDate(k+"-01").toLocaleDateString("en-US",{month:"short",year:"numeric"});}catch{return k;}};
+  const PING_METRICS={pings:"buyer",accepted:"buyer",bids:"pub",won:"pub"};
+  const PING_LABELS={pings:"Buyer Pings",accepted:"Accepted",bids:"Pub Bids",won:"Bids Won"};
+  const lcA=x=>String(x||"").trim().toLowerCase();
+  const buyerPrefixes=(()=>{const m=[];for(const cl of clients){const b=lcA(cl.callgrid_buyer_name);if(b)m.push([b,cl.name]);}
+    m.sort((a,b)=>b[0].length-a[0].length);return m;})();
+  const destClient=dn=>{const k=lcA(dn);for(const [b,n] of buyerPrefixes)if(k.startsWith(b))return n;
+    return String(dn||"").split(" - ")[0].trim()||"—";};
+  const srcPrefixes=(()=>{const m=[];const seen=new Set();
+    const add=(k,n)=>{k=lcA(k);if(k&&!seen.has(k)){seen.add(k);m.push([k,n]);}};
+    for(const pc of publisherCampaigns){const pub=publishers.find(x=>x.id===pc.publisher_id);if(pub)add(pc.callgrid_publisher_name,pub.name);}
+    for(const pub of publishers)add(pub.name,pub.name);
+    m.sort((a,b)=>b[0].length-a[0].length);return m;})();
+  const srcPub=sn=>{const k=lcA(sn);for(const [b,n] of srcPrefixes)if(k.startsWith(b))return n;
+    return String(sn||"").split(" - ")[0].trim()||"—";};
+  const pingRowsF=(pingDaily||[]).map(r=>({date:String(r.date).slice(0,10),client:destClient(r.destination_name),pings:Number(r.total_pings||0),accepted:Number(r.accepted||0)}))
+    .filter(r=>{
+      if(filterStart&&r.date<filterStart)return false;
+      if(filterEnd&&r.date>filterEnd)return false;
+      if(selClients.length&&!selClients.includes(r.client))return false;
+      return true;});
+  const bidRowsF=(bidDaily||[]).map(r=>({date:String(r.date).slice(0,10),publisher:srcPub(r.source_name),pings:Number(r.total_pings||0),bids:Number(r.bids||0),won:Number(r.won||0)}))
+    .filter(r=>{
+      if(filterStart&&r.date<filterStart)return false;
+      if(filterEnd&&r.date>filterEnd)return false;
+      if(selPublishers.length&&!selPublishers.includes(r.publisher))return false;
+      return true;});
+  const pingAgg=(rows,keyF,fields)=>{const m=new Map();for(const r of rows){const k=keyF(r);
+    const a=m.get(k)||Object.fromEntries(fields.map(f=>[f,0]));
+    for(const f of fields)a[f]+=r[f]||0;m.set(k,a);}return m;};
+  const pingByClient=pingAgg(pingRowsF,r=>r.client,["pings","accepted"]);
+  const pingByDate=pingAgg(pingRowsF,r=>r.date,["pings","accepted"]);
+  const bidByPub=pingAgg(bidRowsF,r=>r.publisher,["pings","bids","won"]);
+  const bidByDate=pingAgg(bidRowsF,r=>r.date,["pings","bids","won"]);
+  const pingByWeek=pingAgg(pingRowsF,r=>monOfA(r.date),["pings","accepted"]);
+  const pingByMonth=pingAgg(pingRowsF,r=>monthKeyA(r.date),["pings","accepted"]);
+  const bidByWeek=pingAgg(bidRowsF,r=>monOfA(r.date),["pings","bids","won"]);
+  const bidByMonth=pingAgg(bidRowsF,r=>monthKeyA(r.date),["pings","bids","won"]);
   const combinedRows=buildCombinedRows();
   // ── Summary stats (for main view) ──────────────────────────────────────────
   function buildSummary(groupKey) {
@@ -9114,6 +9953,8 @@ function Actuals({actuals,pubActuals,callgridCalls,clients,publishers,clientCamp
         else if(groupKey==="campaign") key=r.campaign||"—";
         else if(groupKey==="vertical"){const cc=clientCampaigns.find(c=>c.name===r.campaign);key=cc?.vertical||"—";}
         else if(groupKey==="lead_type"){const cc=clientCampaigns.find(c=>c.name===r.campaign);key=cc?.lead_type||"—";}
+        else if(groupKey==="week") key=monOfA(r.date);
+        else if(groupKey==="month") key=monthKeyA(r.date);
         else if(groupKey==="date") key=r.date||"—";
         else key=r.date;
         if(!map[key])map[key]={key,calls:0,tot:0,revenue:0,cost:0,profit:0,days:new Set()};
@@ -9158,13 +9999,36 @@ function Actuals({actuals,pubActuals,callgridCalls,clients,publishers,clientCamp
       return Object.values(pubMap).map(r=>({...r,days:r.days.size})).sort((a,b)=>b.revenue-a.revenue);
     }
     const result = Object.values(map).map(r=>({...r,days:r.days.size}));
-    if (groupKey==="date") return result.sort((a,b)=>String(b.key).localeCompare(String(a.key))); // most recent first
+    if (groupKey==="date"||groupKey==="week"||groupKey==="month") return result.sort((a,b)=>String(b.key).localeCompare(String(a.key))); // most recent first
     return result.sort((a,b)=>b.revenue-a.revenue);
   }
   const [summaryGroup,setSummaryGroup]=usePersistentState("act_summary_group","client");
   const summaryData=buildSummary(summaryGroup);
   // ── Chart data ─────────────────────────────────────────────────────────────
   function buildChartData(){
+    // ping metrics come from the rollup tables, grouped by day, client
+    // (buyer side) or publisher (bid side); other groupings fall back to daily
+    if(PING_METRICS[chartMetric]){
+      const side=PING_METRICS[chartMetric];
+      const rows=side==="buyer"?pingRowsF:bidRowsF;
+      const timeG=["daily","weekly","monthly"].includes(chartGroup);
+      const groupOk=timeG||(side==="buyer"&&chartGroup==="client")||(side==="pub"&&chartGroup==="publisher");
+      const g=groupOk?chartGroup:"daily";
+      const map={};
+      for(const r of rows){
+        const key=g==="daily"?r.date:g==="weekly"?monOfA(r.date):g==="monthly"?monthKeyA(r.date):(g==="client"?r.client:r.publisher);
+        if(!map[key])map[key]={labelKey:g==="daily"?`${dowLetter(key)} ${fmtShort(key)}`:g==="weekly"?"Wk "+fmtShort(key):g==="monthly"?monthLabelA(key):key,_k:key,_hl:g==="daily"&&isMondayD(key),[chartMetric]:0};
+        map[key][chartMetric]+=r[chartMetric]||0;
+      }
+      let vals=Object.values(map);
+      if(["daily","weekly","monthly"].includes(g)){
+        vals.sort((a,b)=>String(a._k).localeCompare(String(b._k)));
+        if(g==="daily"&&chartDays!=="all")vals=vals.slice(-chartDays);
+      }else{
+        vals=vals.sort((a,b)=>b[chartMetric]-a[chartMetric]).slice(0,15);
+      }
+      return vals;
+    }
     const map={};
     combinedRows.forEach(r=>{
       let key;
@@ -9183,23 +10047,25 @@ function Actuals({actuals,pubActuals,callgridCalls,clients,publishers,clientCamp
       if(chartGroup==="daily")key=r.date;
       else if(chartGroup==="client")key=r.client||"—";
       else if(chartGroup==="campaign")key=r.campaign||"—";
+      else if(chartGroup==="weekly")key=monOfA(r.date);
+      else if(chartGroup==="monthly")key=monthKeyA(r.date);
       else key=r.date;
-      if(!map[key])map[key]={labelKey:chartGroup==="daily"?fmtShort(key):key,_k:key,revenue:0,cost:0,profit:0,calls:0};
+      if(!map[key])map[key]={labelKey:chartGroup==="daily"?`${dowLetter(key)} ${fmtShort(key)}`:chartGroup==="weekly"?"Wk "+fmtShort(key):chartGroup==="monthly"?monthLabelA(key):key,_k:key,_hl:chartGroup==="daily"&&isMondayD(key),revenue:0,cost:0,profit:0,calls:0};
       map[key].revenue+=r.revenue;
       map[key].cost+=r.cost;
       map[key].profit+=r.profit;
       map[key].calls+=(r.calls||0);
     });
     let vals=Object.values(map);
-    if(chartGroup==="daily"){
-      // Chronological, then window to the most recent N days
+    if(chartGroup==="daily"||chartGroup==="weekly"||chartGroup==="monthly"){
+      // Chronological, then (daily only) window to the most recent N days
       vals.sort((a,b)=>String(a._k).localeCompare(String(b._k)));
-      if(chartDays!=="all")vals=vals.slice(-chartDays);
+      if(chartGroup==="daily"&&chartDays!=="all")vals=vals.slice(-chartDays);
     }
     return vals;
   }
   const chartData=buildChartData();
-  const metricColors={revenue:C.green,cost:C.amber,profit:C.green,calls:C.teal};
+  const metricColors={revenue:C.green,cost:C.amber,profit:C.green,calls:C.teal,pings:C.accent,accepted:C.green,bids:C.purple,won:C.orange};
   // ── KPIs ───────────────────────────────────────────────────────────────────
   const totalRev=combinedRows.reduce((s,r)=>s+r.revenue,0);
   const totalCost=combinedRows.reduce((s,r)=>s+r.cost,0);
@@ -9287,6 +10153,16 @@ function Actuals({actuals,pubActuals,callgridCalls,clients,publishers,clientCamp
         (data.created_publishers||[]).forEach(n=>autoCreated.add("publisher: "+n));
       }
       let msg=`✓ Synced ${inserted} records from CallGrid`;
+      // Nyala: buyers come from DID attribution, so report how many calls in
+      // the synced window still have no DID match (they carry cost, no revenue)
+      try{
+        const since=new Date(now-daysBack*MS).toLocaleDateString("en-CA",{timeZone:"America/New_York"});
+        const un=await sb("GET",`callgrid_calls?select=destination_number&date=gte.${since}&buyer_offer_crm_id=is.null&limit=5000`);
+        if(un&&un.length){
+          const nums=[...new Set(un.map(c=>String(c.destination_number||"").replace(/\D/g,"").slice(-10)).filter(Boolean))];
+          msg+=` · ${un.length} call${un.length!==1?"s":""} not attributed to a buyer yet${nums.length?` (no DID in HubSpot for ${nums.map(n=>`(${n.slice(0,3)}) ${n.slice(3,6)}-${n.slice(6)}`).join(", ")})`:""}`;
+        }
+      }catch(e){/* informational only */}
       if(autoCreated.size>0)msg+=` — auto-created ${autoCreated.size} new record${autoCreated.size!==1?"s":""}: ${[...autoCreated].join(", ")}`;
       if(unCamp.size>0)msg+=` — ${unCamp.size} unmatched campaign name${unCamp.size!==1?"s":""}: ${[...unCamp].join(", ")}`;
       if(unPub.size>0)msg+=` · ${unPub.size} unmatched publisher name${unPub.size!==1?"s":""}: ${[...unPub].join(", ")}`;
@@ -9301,6 +10177,8 @@ function Actuals({actuals,pubActuals,callgridCalls,clients,publishers,clientCamp
     if(drillDown.type==="campaign")return (r.campaign||"—")===drillDown.value;
     if(drillDown.type==="publisher")return r.pubEntries.some(p=>p.publisher===drillDown.value);
     if(drillDown.type==="date")return r.date===drillDown.value;
+    if(drillDown.type==="week")return monOfA(r.date)===drillDown.value;
+    if(drillDown.type==="month")return monthKeyA(r.date)===drillDown.value;
     if(drillDown.type==="vertical"){const cc=clientCampaigns.find(c=>c.name===r.campaign);return (cc?.vertical||"—")===drillDown.value;}
     if(drillDown.type==="lead_type"){const cc=clientCampaigns.find(c=>c.name===r.campaign);return (cc?.lead_type||"—")===drillDown.value;}
     return true;
@@ -9378,26 +10256,50 @@ function Actuals({actuals,pubActuals,callgridCalls,clients,publishers,clientCamp
     <div style={{...card,marginBottom:16}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          {["revenue","cost","profit","calls"].map(m=><button key={m} onClick={()=>setChartMetric(m)} style={{background:chartMetric===m?metricColors[m]+"20":"transparent",border:`1px solid ${chartMetric===m?metricColors[m]:C.border}`,borderRadius:5,color:chartMetric===m?metricColors[m]:C.sub,padding:"4px 12px",fontSize:12,cursor:"pointer",fontWeight:chartMetric===m?600:400,textTransform:"capitalize"}}>{m}</button>)}
+          {["revenue","cost","profit","calls","pings","accepted","bids","won"].map(m=><button key={m} onClick={()=>setChartMetric(m)} style={{background:chartMetric===m?metricColors[m]+"20":"transparent",border:`1px solid ${chartMetric===m?metricColors[m]:C.border}`,borderRadius:5,color:chartMetric===m?metricColors[m]:C.sub,padding:"4px 12px",fontSize:12,cursor:"pointer",fontWeight:chartMetric===m?600:400,textTransform:"capitalize"}}>{PING_LABELS[m]||m}</button>)}
         </div>
         <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-          {chartGroup==="daily"&&[[30,"30d"],[60,"60d"],[90,"90d"],["all","All"]].map(([d,l])=><button key={l} onClick={()=>setChartDays(d)} style={{background:chartDays===d?C.surface2:"transparent",border:`1px solid ${chartDays===d?C.teal:C.border}`,borderRadius:5,color:chartDays===d?C.teal:C.sub,padding:"4px 10px",fontSize:11,cursor:"pointer"}}>{l}</button>)}
+          {chartGroup==="daily"&&[[30,"30d"],[60,"60d"],[90,"90d"],["all","All"]].map(([d,l])=><button key={l} onClick={()=>setChartDays(d)} style={{background:chartDays===d?`${C.accent}26`:"transparent",border:`1px solid ${chartDays===d?C.teal:C.border}`,borderRadius:5,color:chartDays===d?C.teal:C.sub,padding:"4px 10px",fontSize:11,cursor:"pointer"}}>{l}</button>)}
           <div style={{width:1,background:C.border,margin:"0 4px"}}/>
-          {["daily","client","campaign","publisher"].map(g=><button key={g} onClick={()=>setChartGroup(g)} style={{background:chartGroup===g?C.surface2:"transparent",border:`1px solid ${chartGroup===g?C.accent:C.border}`,borderRadius:5,color:chartGroup===g?C.accent:C.sub,padding:"4px 10px",fontSize:11,cursor:"pointer",textTransform:"capitalize"}}>{g}</button>)}
+          {["daily","weekly","monthly","client","campaign","publisher"].map(g=><button key={g} onClick={()=>setChartGroup(g)} style={{background:chartGroup===g?`${C.accent}26`:"transparent",border:`1px solid ${chartGroup===g?C.accent:C.border}`,borderRadius:5,color:chartGroup===g?C.accent:C.sub,padding:"4px 10px",fontSize:11,cursor:"pointer",textTransform:"capitalize"}}>{g}</button>)}
         </div>
       </div>
-      <BarChart data={chartData} valueKey={chartMetric} labelKey="labelKey" color={metricColors[chartMetric]} formatValue={chartMetric==="calls"?(v=>v.toLocaleString()):undefined}/>
+      <BarChart data={chartData} valueKey={chartMetric} labelKey="labelKey" color={metricColors[chartMetric]} formatValue={(chartMetric==="calls"||PING_METRICS[chartMetric])?(v=>v.toLocaleString()):undefined}/>
+      {PING_METRICS[chartMetric]&&(()=>{
+        const side=PING_METRICS[chartMetric];
+        const ok=chartGroup==="daily"||(side==="buyer"&&chartGroup==="client")||(side==="pub"&&chartGroup==="publisher");
+        const loading=(side==="buyer"?pingDaily:bidDaily)===null;
+        return <div style={{fontSize:11,color:C.dim,marginTop:6}}>
+          {loading?"Loading ping data…":side==="buyer"
+            ?`Buyer-side ping volume from CallGrid${ok?"":" — this metric groups by day or client, showing daily"}. Clients matched by buyer name; Accept % and buyer detail live in Analysis → Pings & Bids.`
+            :`Publisher-side bid volume from CallGrid${ok?"":" — this metric groups by day or publisher, showing daily"}. Sources matched by publisher name.`}
+        </div>;})()}
     </div>
     {/* ── Summary table ── */}
     <div style={card}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
         <div style={{fontSize:14,fontWeight:700,color:C.text}}>Performance Summary</div>
         <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-          {["date","client","campaign","publisher","vertical","lead_type"].map(g=><button key={g} onClick={()=>setSummaryGroup(g)} style={{background:summaryGroup===g?C.accent:"transparent",border:`1px solid ${summaryGroup===g?C.accent:C.border}`,borderRadius:5,color:summaryGroup===g?C.accentFg:C.sub,padding:"4px 10px",fontSize:11,cursor:"pointer",textTransform:"capitalize"}}>{g==="date"?"Daily":g.replace("_"," ")}</button>)}
+          {["date","week","month","client","campaign","publisher","vertical","lead_type"].map(g=><button key={g} onClick={()=>{setSummaryGroup(g);setDrillDown(null);}} style={{background:summaryGroup===g?C.accent:"transparent",border:`1px solid ${summaryGroup===g?C.accent:C.border}`,borderRadius:5,color:summaryGroup===g?C.accentFg:C.sub,padding:"4px 10px",fontSize:11,cursor:"pointer",textTransform:"capitalize"}}>{g==="date"?"Daily":g==="week"?"Weekly":g==="month"?"Monthly":g.replace("_"," ")}</button>)}
         </div>
       </div>
-      <Table cols={[
-        {key:"key",label:summaryGroup==="date"?"Date":summaryGroup.replace("_"," "),render:(v,r)=><button onClick={()=>setDrillDown({type:summaryGroup,value:v})} style={{background:"none",border:"none",color:C.accent,cursor:"pointer",fontSize:13,textDecoration:"underline",textAlign:"left"}}>{summaryGroup==="date"?fmtDate(v):v}</button>},
+      <Table rowStyle={r=>summaryGroup==="date"&&isMondayD(r.key)?mondayRowStyle:undefined}
+        expandedRow={drillDown?.value}
+        renderExpanded={row=><div style={{padding:"8px 16px 16px 28px",background:"rgba(255,255,255,0.02)"}}>
+          <div style={{fontSize:11,color:C.sub,textTransform:"uppercase",letterSpacing:"0.06em",margin:"8px 0"}}>Detail — {summaryGroup==="date"?`${dowLetter(row.key)} ${fmtDate(row.key)}`:summaryGroup==="week"?"Week of "+fmtDate(row.key):summaryGroup==="month"?monthLabelA(row.key):row.key}</div>
+          <Table cols={[
+            {key:"date",label:"Date",nowrap:true,render:v=><span>{dowLetter(v)} {fmtDate(v)}</span>},
+            {key:"client",label:"Client"},{key:"campaign",label:"Campaign"},
+            {key:"calls_total",label:"Total",right:true,render:v=>v!=null?<span style={mono}>{v.toLocaleString()}</span>:<span style={{color:C.dim}}>—</span>},
+            {key:"calls",label:"Billable",right:true,render:v=>v!=null?<span style={mono}>{v.toLocaleString()}</span>:"—"},
+            {key:"revenue",label:"Revenue",right:true,render:v=><span style={{...mono,color:C.green}}>{fmt$(v)}</span>},
+            {key:"cost",label:"Pub Cost",right:true,render:v=><span style={{...mono,color:C.amber}}>{fmt$(v)}</span>},
+            {key:"profit",label:"Profit",right:true,render:v=><span style={{...mono,color:v>=0?C.green:C.red}}>{fmt$(v)}</span>},
+            {key:"_a",label:"",render:(_,r)=>r.actualRow&&<Btn onClick={()=>{setEditingActualId(r.actualRow.id);setManForm({date:r.actualRow.date,client_id:clients.find(c=>c.name===r.actualRow.client)?.id||"",campaign_id:r.actualRow.client_campaign_id||"",billable_calls:r.actualRow.calls||"",revenue:r.actualRow.revenue||"",revenue_override:true,pub_entries:[]});setEntryMode("single");setDrillDown(null);setShowManual(true);}} outline color={C.accent} style={{padding:"4px 8px",fontSize:11}}>Edit</Btn>},
+          ]} rowStyle={r=>isMondayD(r.date)?mondayRowStyle:undefined} rows={drillRows} emptyMsg="No entries."/>
+        </div>}
+        cols={[
+        {key:"key",label:summaryGroup==="date"?"Date":summaryGroup==="week"?"Week":summaryGroup==="month"?"Month":summaryGroup.replace("_"," "),nowrap:summaryGroup==="date"||summaryGroup==="week"||summaryGroup==="month",render:(v,r)=><button onClick={()=>setDrillDown(drillDown?.value===v?null:{type:summaryGroup,value:v})} style={{background:"none",border:"none",color:C.accent,cursor:"pointer",fontSize:13,textAlign:"left",display:"flex",gap:6,alignItems:"center"}}><span style={{fontSize:11}}>{drillDown?.value===v?"▾":"▸"}</span>{summaryGroup==="date"?`${dowLetter(v)} ${fmtDate(v)}`:summaryGroup==="week"?"Wk of "+fmtDate(v):summaryGroup==="month"?monthLabelA(v):v}</button>},
         {key:"days",label:"Days",right:true,render:v=><span style={mono}>{v}</span>},
         {key:"tot",label:"Total",right:true,render:v=><span style={mono}>{v?.toLocaleString()}</span>},
         {key:"calls",label:"Billable",right:true,render:v=><span style={mono}>{v?.toLocaleString()}</span>},
@@ -9405,6 +10307,18 @@ function Actuals({actuals,pubActuals,callgridCalls,clients,publishers,clientCamp
         {key:"_rpc",label:"RPC",right:true,render:(v,r)=>r.calls>0?<span style={{...mono,color:C.green}}>{fmt$(r.revenue/r.calls)}</span>:<span style={{color:C.dim,fontSize:11}}>—</span>},
         {key:"cost",label:"Pub Cost",right:true,render:v=><span style={{...mono,color:C.amber}}>{fmt$(v)}</span>},
         {key:"profit",label:"Profit",right:true,render:(v)=><span style={{...mono,color:v>=0?C.green:C.red}}>{fmt$(v)}</span>},
+        ...((summaryGroup==="client"||summaryGroup==="date"||summaryGroup==="week"||summaryGroup==="month")?[
+          {key:"_pings",label:"Pings",right:true,render:(_,r)=>{const a=(summaryGroup==="client"?pingByClient:summaryGroup==="week"?pingByWeek:summaryGroup==="month"?pingByMonth:pingByDate).get(r.key);
+            return a&&a.pings?<span style={mono}>{a.pings.toLocaleString()}</span>:<span style={{color:C.dim,fontSize:11}}>—</span>;}},
+          {key:"_acc",label:"Accept %",right:true,render:(_,r)=>{const a=(summaryGroup==="client"?pingByClient:summaryGroup==="week"?pingByWeek:summaryGroup==="month"?pingByMonth:pingByDate).get(r.key);
+            return a&&a.pings?<span style={{...mono,color:a.accepted/a.pings<0.02?C.red:C.text}}>{(a.accepted/a.pings*100).toFixed(1)}%</span>:<span style={{color:C.dim,fontSize:11}}>—</span>;}},
+        ]:[]),
+        ...((summaryGroup==="publisher"||summaryGroup==="date"||summaryGroup==="week"||summaryGroup==="month")?[
+          {key:"_bids",label:"Bids",right:true,render:(_,r)=>{const a=(summaryGroup==="publisher"?bidByPub:summaryGroup==="week"?bidByWeek:summaryGroup==="month"?bidByMonth:bidByDate).get(r.key);
+            return a&&a.bids?<span style={mono}>{a.bids.toLocaleString()}</span>:<span style={{color:C.dim,fontSize:11}}>—</span>;}},
+          {key:"_won",label:"Bids Won",right:true,render:(_,r)=>{const a=(summaryGroup==="publisher"?bidByPub:summaryGroup==="week"?bidByWeek:summaryGroup==="month"?bidByMonth:bidByDate).get(r.key);
+            return a&&a.bids?<span style={mono}>{a.won.toLocaleString()} ({Math.round(a.won/Math.max(1,a.bids)*100)}%)</span>:<span style={{color:C.dim,fontSize:11}}>—</span>;}},
+        ]:[]),
       ]} rows={summaryData} emptyMsg="No actuals data yet. Add entries or sync CallGrid."/>
     </div>
     {/* ── Call detail (rollup → individual raw calls from CallGrid) ── */}
@@ -9425,14 +10339,20 @@ function Actuals({actuals,pubActuals,callgridCalls,clients,publishers,clientCamp
                 {["date","client","campaign","publisher"].map(g=><button key={g} onClick={()=>setCallDetailGroup(g)} style={{background:callDetailGroup===g?C.accent:"transparent",border:`1px solid ${callDetailGroup===g?C.accent:C.border}`,borderRadius:5,color:callDetailGroup===g?C.accentFg:C.sub,padding:"4px 10px",fontSize:11,cursor:"pointer"}}>{g==="date"?"Daily":g.charAt(0).toUpperCase()+g.slice(1)}</button>)}
               </div>
               <Table cols={[
-                {key:"key",label:callDetailGroup==="date"?"Date":callDetailGroup,render:v=><button onClick={()=>setCallDrillDown({type:callDetailGroup,value:v})} style={{background:"none",border:"none",color:C.accent,cursor:"pointer",fontSize:13,textDecoration:"underline",textAlign:"left"}}>{callDetailGroup==="date"?fmtDate(v):v}</button>},
-                {key:"calls",label:"Total",right:true,render:v=><span style={mono}>{v.toLocaleString()}</span>},
-                {key:"bill",label:"Billable",right:true,render:v=><span style={mono}>{v.toLocaleString()}</span>},
-                {key:"revenue",label:"Revenue",right:true,render:v=><span style={{...mono,color:C.green}}>{fmt$(v)}</span>},
+                {key:"key",label:callDetailGroup==="date"?"Date":callDetailGroup,nowrap:true,render:v=><button onClick={()=>setCallDrillDown({type:callDetailGroup,value:v})} style={{background:"none",border:"none",color:C.accent,cursor:"pointer",fontSize:13,textDecoration:"underline",textAlign:"left"}}>{callDetailGroup==="date"?`${dowLetter(v)} ${fmtDate(v)}`:v}</button>},
+                {key:"inc",label:"Incoming",right:true,render:v=><span style={mono}>{v.toLocaleString()}</span>},
+                {key:"calls",label:"Connected",right:true,render:(v,r)=><span style={mono}>{v.toLocaleString()}{r.inc?` (${Math.round(v/r.inc*100)}%)`:""}</span>},
+                {key:"bill",label:"Billable",right:true,render:(v,r)=><span style={mono}>{v.toLocaleString()}{r.calls?` (${Math.round(v/r.calls*100)}%)`:""}</span>},
+                {key:"noconn",label:"No Conn",right:true,render:(v,r)=><span style={{...mono,color:v&&v/Math.max(1,r.inc)>=0.25?C.red:C.text}}>{v.toLocaleString()}</span>},
+                {key:"line",label:"Busy/NoAns/NoRoute",right:true,render:v=>v?<span style={{...mono,color:C.amber}}>{v.toLocaleString()}</span>:<span style={{color:C.dim,fontSize:11}}>—</span>},
                 {key:"_rpc",label:"RPC",right:true,render:(v,r)=>r.bill>0?<span style={{...mono,color:C.green}}>{fmt$(r.revenue/r.bill)}</span>:<span style={{color:C.dim,fontSize:11}}>—</span>},
+                {key:"revenue",label:"Revenue",right:true,render:v=><span style={{...mono,color:C.green}}>{fmt$(v)}</span>},
                 {key:"payout",label:"Payout",right:true,render:v=><span style={{...mono,color:C.amber}}>{fmt$(v)}</span>},
                 {key:"profit",label:"Profit",right:true,render:v=><span style={{...mono,color:v>=0?C.green:C.red}}>{fmt$(v)}</span>},
-              ]} rows={callSummaryData} emptyMsg="No calls."/>
+                {key:"_margin",label:"Margin",right:true,render:(_,r)=>r.revenue>0?<span style={{...mono,color:(r.profit/r.revenue)>=0?C.text:C.red}}>{(r.profit/r.revenue*100).toFixed(1)}%</span>:<span style={{color:C.dim,fontSize:11}}>—</span>},
+                {key:"dur",label:"TCL",right:true,nowrap:true,render:v=><span style={mono}>{hmsFmt(v)}</span>},
+                {key:"_acl",label:"ACL",right:true,nowrap:true,render:(_,r)=>r.calls?<span style={mono}>{hmsFmt(r.dur/r.calls)}</span>:<span style={{color:C.dim,fontSize:11}}>—</span>},
+              ]} rowStyle={r=>callDetailGroup==="date"&&isMondayD(r.key)?mondayRowStyle:undefined} rows={callSummaryData} emptyMsg="No calls."/>
             </>
           ) : (
             <>
@@ -9460,18 +10380,7 @@ function Actuals({actuals,pubActuals,callgridCalls,clients,publishers,clientCamp
       )}
     </div>
     {/* ── Drill-down modal ── */}
-    {drillDown&&<Modal title={`Detail — ${drillDown.value}`} onClose={()=>setDrillDown(null)}>
-      <Table cols={[
-        {key:"date",label:"Date",render:v=>fmtDate(v)},
-        {key:"client",label:"Client"},{key:"campaign",label:"Campaign"},
-        {key:"calls_total",label:"Total",right:true,render:v=>v!=null?<span style={mono}>{v.toLocaleString()}</span>:<span style={{color:C.dim}}>—</span>},
-        {key:"calls",label:"Billable",right:true,render:v=>v!=null?<span style={mono}>{v.toLocaleString()}</span>:"—"},
-        {key:"revenue",label:"Revenue",right:true,render:v=><span style={{...mono,color:C.green}}>{fmt$(v)}</span>},
-        {key:"cost",label:"Pub Cost",right:true,render:v=><span style={{...mono,color:C.amber}}>{fmt$(v)}</span>},
-        {key:"profit",label:"Profit",right:true,render:v=><span style={{...mono,color:v>=0?C.green:C.red}}>{fmt$(v)}</span>},
-        {key:"_a",label:"",render:(_,r)=>r.actualRow&&<Btn onClick={()=>{setEditingActualId(r.actualRow.id);setManForm({date:r.actualRow.date,client_id:clients.find(c=>c.name===r.actualRow.client)?.id||"",campaign_id:r.actualRow.client_campaign_id||"",billable_calls:r.actualRow.calls||"",revenue:r.actualRow.revenue||"",revenue_override:true,pub_entries:[]});setEntryMode("single");setDrillDown(null);setShowManual(true);}} outline color={C.accent} style={{padding:"4px 8px",fontSize:11}}>Edit</Btn>},
-      ]} rows={drillRows} emptyMsg="No entries."/>
-    </Modal>}
+    
     </>
     }
     {/* ── Internal TV Media view ── */}
@@ -9584,9 +10493,29 @@ function Actuals({actuals,pubActuals,callgridCalls,clients,publishers,clientCamp
     </Modal>}
   </div>;
 }
+// Roku creative-level spend for analysis views: rows from roku_creative_stats
+// (auto TFN-matched). Returns {rows, byTv:Map(tv_creative_id→spend), total}.
+function useRokuCreativeSpend(){
+  const [rows,setRows]=useState([]);
+  useEffect(()=>{(async()=>{try{setRows(await sbAll("roku_creative_stats?select=date,spend,impressions,tv_creative_id,creative_name")||[]);}catch(e){/* not set up */}})();},[]);
+  const calc=React.useCallback((from,to)=>{
+    const byTv=new Map();let total=0;
+    for(const r of rows){
+      const d=String(r.date);
+      if(from&&d<from)continue;
+      if(to&&d>to)continue;
+      const v=Number(r.spend||0);total+=v;
+      if(r.tv_creative_id)byTv.set(r.tv_creative_id,(byTv.get(r.tv_creative_id)||0)+v);
+    }
+    return {byTv,total};
+  },[rows]);
+  return {rows,calc};
+}
 function TVPerformanceView({tvBuyLines,tvCampaigns,callgridCalls,clientCampaigns,networks,tvCreatives}){
   const [groupBy,setGroupBy]=useState("campaign");// campaign | network | creative
   const tvCalls=callgridCalls.filter(c=>c.is_tv_call);
+  const roku=useRokuCreativeSpend();
+  const rokuAll=roku.calc(null,null);
   // Group by campaign
   function byCampaign(){
     const out={};
@@ -9604,6 +10533,13 @@ function TVPerformanceView({tvBuyLines,tvCampaigns,callgridCalls,clientCampaigns
   }
   function byNetwork(){
     const out={};
+    // Roku rides as its own platform row: spend from the creative report,
+    // calls/revenue from TFN-attributed calls with no linear network
+    const rokuCalls=tvCalls.filter(c=>!c.tv_network_id);
+    if(rokuAll.total>0||rokuCalls.length){
+      out.__roku={id:"__roku",name:"Roku (Internal CTV)",spend:rokuAll.total,
+        calls:rokuCalls.length,revenue:rokuCalls.reduce((s2,c)=>s2+(c.revenue||0),0)};
+    }
     tvBuyLines.forEach(l=>{
       const net=networks.find(n=>n.id===l.network_id);
       const name=net?.name||l.network_id||"Unknown";
@@ -9623,11 +10559,20 @@ function TVPerformanceView({tvBuyLines,tvCampaigns,callgridCalls,clientCampaigns
     tvCalls.forEach(c=>{
       const cr=tvCreatives.find(t=>t.id===c.tv_creative_id);
       const name=cr?.name||c.tv_creative_id||"Unknown";
-      if(!out[name])out[name]={id:name,name,calls:0,revenue:0};
+      if(!out[name])out[name]={id:name,name,tvId:c.tv_creative_id||null,calls:0,revenue:0};
       out[name].calls++;
       out[name].revenue+=(c.revenue||0);
     });
-    return Object.values(out).map(r=>({...r,spend:0,cpc:0,roas:0})).sort((a,b)=>b.calls-a.calls);
+    // creatives with Roku spend but no calls yet still deserve a row
+    for(const [tvId,sp] of rokuAll.byTv){
+      const cr=tvCreatives.find(t=>t.id===tvId);
+      const name=cr?.name||tvId;
+      if(!out[name])out[name]={id:name,name,tvId,calls:0,revenue:0};
+    }
+    return Object.values(out).map(r=>{
+      const spend=r.tvId?(rokuAll.byTv.get(r.tvId)||0):0;
+      return {...r,spend,cpc:r.calls>0&&spend?spend/r.calls:0,roas:spend>0?r.revenue/spend:0,profit:r.revenue-spend};
+    }).sort((a,b)=>b.calls-a.calls);
   }
   const rows=groupBy==="campaign"?byCampaign():groupBy==="network"?byNetwork():byCreative();
   const totSpend=rows.reduce((s,r)=>s+r.spend,0);
@@ -9744,7 +10689,8 @@ function Analysis({arRows,apRows,actuals,callgridCalls,clientCampaigns,publisher
   const tvCallDates = tvCalls.map(c=>c.date).filter(Boolean).sort();
   const tvDataStart = tvCallDates[0]||"";
   const tvDataEnd = tvCallDates[tvCallDates.length-1]||"";
-  function getNetworkName(id){return networks?.find(n=>n.id===id)?.name||"Unknown Network";}
+  function getNetworkName(id){return networks?.find(n=>n.id===id)?.name||"Roku (Internal CTV)";}
+  const rokuA=useRokuCreativeSpend();
   function getCreativeName(id){return tvCreatives?.find(c=>c.id===id)?.name||"Unknown Creative";}
   function getCampaignName(id){return tvCampaigns?.find(c=>c.id===id)?.name||"?";}
   // Get TV spend from bookings for a network/creative/date range
@@ -9770,7 +10716,8 @@ function Analysis({arRows,apRows,actuals,callgridCalls,clientCampaigns,publisher
       byNetwork[key].revenue+=(c.revenue||0);
     });
     const rows=Object.values(byNetwork).map((r)=>{
-      const spend=getTVSpend(r.network_id,null,from,to);
+      let spend=getTVSpend(r.network_id,null,from,to);
+      if(!r.network_id)spend+=rokuA.calc(from,to).total; // TFN calls with no linear network = our Roku buys
       const cpc=r.calls>0?spend/r.calls:0;
       const rpc=r.calls>0?r.revenue/r.calls:0;
       return{...r,name:getNetworkName(r.network_id),spend,cpc,rpc,profit:r.revenue-spend,margin:r.revenue>0?(((r.revenue-spend)/r.revenue)*100).toFixed(1)+"%":"—"};
@@ -9811,8 +10758,11 @@ function Analysis({arRows,apRows,actuals,callgridCalls,clientCampaigns,publisher
       byCreative[key].calls+=1;
       byCreative[key].revenue+=(c.revenue||0);
     });
+    const rokuSp=rokuA.calc(from,to).byTv;
+    // creatives with Roku spend but no calls in range still get a row
+    for(const [tvId] of rokuSp){const k=tvId||"unknown";if(!byCreative[k])byCreative[k]={creative_id:tvId,calls:0,revenue:0};}
     const rows=Object.values(byCreative).map((r)=>{
-      const spend=getTVSpend(null,r.creative_id,from,to);
+      const spend=getTVSpend(null,r.creative_id,from,to)+(r.creative_id?(rokuSp.get(r.creative_id)||0):0);
       const cpc=r.calls>0?spend/r.calls:0;
       const rpc=r.calls>0?r.revenue/r.calls:0;
       const creative=tvCreatives?.find(c=>c.id===r.creative_id);
@@ -10282,18 +11232,327 @@ function Analysis({arRows,apRows,actuals,callgridCalls,clientCampaigns,publisher
 //  • Explorer: filterable individual bid pings (won only, bid over X, buyer,
 //    source, state...) with each row expandable to the full raw CallGrid
 //    record. Raw rows keep 30 days; hourly aggregates keep forever.
+// ═══════════════ CALL INTELLIGENCE — CallGrid AI transcription breakdown ═══════════════
+// Per-buyer and per-publisher view of the AI insight tags that CallGrid
+// writes on every transcribed call (synced hourly by callgrid-insights-sync),
+// plus a call browser with summaries, tag flags, transcripts and recordings.
+const CI_RED={
+  ad_source:["Phone Pop-up","Social Media","Website or Search","Text Message","Mail"],
+  ad_promise:["Free Coverage","Benefit or Grocery Card","Cash or Gift Card","Government Program"], // "Other Claim" demoted Nov 10: CallGrid tags it on any mention of the ad (coverage amounts etc.), so it flagged normal calls
+  transfer_signs:["Third Party Handoff","Says They Were Transferred","Says We Called Them"],
+  who_spoke:["No One Spoke","Agent Only","Caller Only"],
+};
+// Wording that supports each flag value. Used to highlight the trigger in the
+// transcript; a flagged call with NO matching wording is marked unsupported,
+// which is the tell for an over-firing tag. (Who-spoke/dead-air has no
+// wording to find: it is about silence.)
+const CI_EVIDENCE={
+  ad_source:{
+    "Phone Pop-up":[/pop[\s-]?up/i,/popped up/i,/came up on my (phone|screen)/i,/clicked (on )?(it|the ad|an ad)/i,/an? ad on my phone/i],
+    "Social Media":[/face\s?book/i,/instagram/i,/tik\s?tok/i,/you\s?tube/i,/snapchat/i,/social media/i],
+    "Website or Search":[/web\s?site/i,/\bonline\b/i,/google/i,/search(ed|ing)?\b/i,/internet/i,/on (my|the) computer/i,/filled (out|in).{0,20}form/i],
+    "Text Message":[/text(ed)? (message|me)/i,/got a text/i,/\bsms\b/i],
+    "Mail":[/in the mail/i,/\bmail(er|ed)?\b/i,/\bletter\b/i,/post\s?card/i,/envelope/i],
+  },
+  ad_promise:{
+    "Free Coverage":[/\bfree\b/i,/no cost/i,/at no charge/i,/don'?t (have to )?pay/i,/wouldn'?t cost/i],
+    "Benefit or Grocery Card":[/grocer(y|ies)/i,/food (card|allowance|benefit|stamps)/i,/benefits? card/i,/flex card/i,/spending card/i],
+    "Cash or Gift Card":[/gift card/i,/cash (card|back)/i,/\$\s?\d{2,4}/,/hundred dollars/i,/money (back|for)/i],
+    "Government Program":[/government/i,/\bstate\b.{0,15}program/i,/federal/i,/medicare|medicaid/i,/social security/i,/biden|trump|congress/i,/new law/i],
+    "Other Claim":[/\bfree\b/i,/promised/i,/supposed to (get|receive|be getting)/i,/they (said|told me) i('?d| would)? (get|receive)/i,/\$\s?\d{2,4}/],
+  },
+  transfer_signs:{
+    "Third Party Handoff":[/transfer(ring|red)? (you|him|her|the call)/i,/hand (you|the call) (over|off)/i,/stay on the line/i,/connect(ing)? you (to|with)/i,/bring(ing)? on (the line|my)/i,/licensed agent (is|will be) (on|joining)/i],
+    "Says They Were Transferred":[/(was|been|got|getting) transferred/i,/they transferred me/i,/(just|already) (spoke|talked) (to|with) (someone|somebody|another)/i,/other (lady|guy|person|agent|gentleman)/i,/told them (all of )?this already/i],
+    "Says We Called Them":[/you (guys |all )?called me/i,/i got a call from (you|y'?all)/i,/you called/i,/missed call/i,/call(ed|ing) me back/i,/kept calling/i,/why (are you|you) calling/i],
+  },
+};
+// ev entries for a call's red flags; who_spoke intentionally has none
+function ciEvFor(a){
+  const out=[];
+  const add=(col,val,label,color)=>{
+    if(val==null||!(CI_RED[col]||[]).includes(val))return;
+    const pats=(CI_EVIDENCE[col]||{})[val]||Object.values(CI_EVIDENCE[col]||{}).flat();
+    out.push({col,label,color,pats});
+  };
+  add("ad_source",a.ad_source,`non-TV (${a.ad_source})`,"#ef5a5a");
+  add("ad_promise",a.ad_promise,`promise (${a.ad_promise})`,"#ef5a5a");
+  add("transfer_signs",a.transfer_signs,`transfer (${a.transfer_signs})`,"#e5a140");
+  return out;
+}
+// split a line's text into plain + highlighted spans for its matching flags
+function ciHiSpans(tx,hits,C){
+  if(!hits.length)return tx;
+  const segs=[];let rest=String(tx);let k=0,guard=0;
+  const find=(str)=>{
+    let best=null;
+    for(const e of hits)for(const p of e.pats){
+      const m=str.match(p);
+      if(m&&m.index!=null&&m[0].length&&(best==null||m.index<best.index))best={index:m.index,len:m[0].length,color:e.color};
+    }
+    return best;
+  };
+  while(rest&&guard++<40){
+    const b=find(rest);
+    if(!b){segs.push(rest);break;}
+    if(b.index>0)segs.push(rest.slice(0,b.index));
+    segs.push(<span key={k++} style={{background:b.color+"30",color:C.text,fontWeight:700,borderRadius:3,padding:"0 2px",boxShadow:`inset 0 -2px 0 ${b.color}`}}>{rest.slice(b.index,b.index+b.len)}</span>);
+    rest=rest.slice(b.index+b.len);
+  }
+  return segs;
+}
+function CallIntel({data}){
+  const calls=data.callgridCalls||[];
+  const etD=new Intl.DateTimeFormat("en-CA",{timeZone:"America/New_York",year:"numeric",month:"2-digit",day:"2-digit"});
+  const today=etD.format(new Date());
+  const ago=n=>{const d=new Date();d.setDate(d.getDate()-n);return etD.format(d);};
+  const [start,end,setStart,setEnd]=usePersistentRange("ci_range",7);
+  const [side,setSide]=usePersistentState("ci_side","publisher"); // publisher | buyer
+  const [ai,setAi]=useState(null);
+  const [loading,setLoading]=useState(false);
+  const [sel,setSel]=useState(null);
+  const [redOnly,setRedOnly]=useState(false);
+  const [camp,setCamp]=useState("");
+  const [flagFilter,setFlagFilter]=useState(null); // nontv | promise | transfer | dead
+  const [selCall,setSelCall]=useState(null);
+  // deep link from the Alerts page: focus the entity an alert fired on
+  useEffect(()=>{try{
+    const j=JSON.parse(localStorage.getItem("ci_jump")||"null");
+    if(j&&Date.now()-(j.t||0)<60000&&(j.name||j.flag)){
+      if(j.name){setSide(j.side==="buyer"?"buyer":"publisher");setSel(j.name);setRedOnly(true);}
+      if(j.flag)setFlagFilter(j.flag);
+      localStorage.removeItem("ci_jump");
+    }
+  }catch(e){}},[]);
+  const [detail,setDetail]=useState({});
+  const dOf=c=>String(c.date||"").slice(0,10);
+  const inRange=calls.filter(c=>{const d=dOf(c);return d>=start&&d<=end&&isConnCall(c);});
+  const callById=new Map(inRange.map(c=>[String(c.inbound_call_id),c]));
+  async function load(){
+    setLoading(true);
+    const ids=[...callById.keys()];
+    const m=new Map();
+    for(let i=0;i<ids.length;i+=150){
+      const chunk=ids.slice(i,i+150).map(x=>`"${x}"`).join(",");
+      try{
+        const got=await sb("GET",`call_analysis?inbound_call_id=in.(${chunk})&status=eq.ANALYSED&select=inbound_call_id,source,disposition,conversion,coverage_discussed,beneficiary_mentioned,ad_source,ad_promise,transfer_signs,who_spoke`);
+        for(const g of (got||[]))m.set(String(g.inbound_call_id),g);
+      }catch(_e){/* pre-migration or RLS */}
+    }
+    setAi(m);setLoading(false);
+  }
+  useEffect(()=>{load();},[start,end]);
+  const keyOf=c=>side==="publisher"?(c.publisher_name||"(unknown source)"):(c.target_name||"(no buyer)");
+  const red=(col,v)=>v!=null&&(CI_RED[col]||[]).includes(v);
+  const ents=(()=>{
+    if(!ai)return [];
+    const m=new Map();
+    for(const [id,a] of ai){
+      const c=callById.get(id);if(!c)continue;
+      const k=keyOf(c);
+      let e=m.get(k);
+      if(!e){e={key:k,n:0,srcTagged:0,nontv:0,promise:0,transfer:0,trChecked:0,dead:0,spokeChecked:0,enrolled:0,notInt:0,dropped:0,covYes:0,covN:0};m.set(k,e);}
+      e.n++;
+      if(a.ad_source!=null&&/tv/i.test(String(c.campaign_name||""))){e.srcTagged++;if(red("ad_source",a.ad_source))e.nontv++;}
+      if(red("ad_promise",a.ad_promise))e.promise++;
+      if(a.transfer_signs!=null&&!/transfer/i.test(String(c.campaign_name||""))){e.trChecked++;if(red("transfer_signs",a.transfer_signs))e.transfer++;}
+      if(a.who_spoke!=null&&Number(c.call_length_seconds||0)>30){e.spokeChecked++;if(red("who_spoke",a.who_spoke))e.dead++;}
+      if(a.disposition==="Enrolled")e.enrolled++;
+      if(a.disposition==="Not Interested")e.notInt++;
+      if(a.disposition==="Call Dropped"||a.disposition==="Dead Air")e.dropped++;
+      if(a.coverage_discussed!=null){e.covN++;if(String(a.coverage_discussed).toLowerCase().startsWith("y"))e.covYes++;}
+    }
+    return [...m.values()].sort((a,b)=>b.n-a.n);
+  })();
+  const flagsFor=(a)=>{
+    const f=[];
+    if(red("ad_source",a.ad_source))f.push(["NON-TV: "+a.ad_source,C.red]);
+    if(red("ad_promise",a.ad_promise))f.push([String(a.ad_promise).toUpperCase(),C.red]);
+    if(red("transfer_signs",a.transfer_signs))f.push([a.transfer_signs,C.amber]);
+    if(red("who_spoke",a.who_spoke))f.push(["DEAD AIR: "+a.who_spoke,C.amber]);
+    return f;
+  };
+  const browser=(()=>{
+    if(!ai)return [];
+    const out=[];
+    for(const [id,a] of ai){
+      const c=callById.get(id);if(!c)continue;
+      if(sel&&keyOf(c)!==sel)continue;
+      const flags=flagsFor(a);
+      if(redOnly&&!flags.length)continue;
+      if(flagFilter==="nontv"&&!red("ad_source",a.ad_source))continue;
+      if(flagFilter==="promise"&&!red("ad_promise",a.ad_promise))continue;
+      if(flagFilter==="transfer"&&!red("transfer_signs",a.transfer_signs))continue;
+      if(flagFilter==="dead"&&!red("who_spoke",a.who_spoke))continue;
+      out.push({id,c,a,flags});
+    }
+    out.sort((x,y)=>String(y.c.call_datetime||"").localeCompare(String(x.c.call_datetime||"")));
+    return out.slice(0,300);
+  })();
+  async function selectCall(id){
+    setSelCall(id);
+    if(detail[id])return;
+    setDetail(d=>({...d,[id]:{loading:true}}));
+    try{
+      const got=await sb("GET",`call_analysis?inbound_call_id=eq.${encodeURIComponent(id)}&select=summary,transcript,recording_url`);
+      setDetail(d=>({...d,[id]:got?.[0]||{}}));
+    }catch(e){setDetail(d=>({...d,[id]:{error:String(e.message||e)}}));}
+  }
+  const etTime=dt=>{try{return new Date(dt).toLocaleString("en-US",{timeZone:"America/New_York",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});}catch{return "";}};
+  const chip=(t,c,k)=><span key={k||t} style={{fontSize:9,fontWeight:700,color:c,border:`1px solid ${c}`,borderRadius:4,padding:"1px 5px",marginRight:4,whiteSpace:"nowrap"}}>{t}</span>;
+  const pcCell=(n,d,hi,warn)=>{const v=d?n/d:0;return <span style={{...mono,color:!d?C.dim:v>=hi?C.red:v>=warn?C.amber:C.text}}>{d?`${n} (${Math.round(v*100)}%)`:"—"}</span>;};
+  const totals=ents.reduce((t,e)=>{t.n+=e.n;t.promise+=e.promise;t.nontv+=e.nontv;t.dead+=e.dead;t.transfer+=e.transfer;t.enrolled+=e.enrolled;return t;},{n:0,promise:0,nontv:0,dead:0,transfer:0,enrolled:0});
+  return <div>
+    <h2 style={{fontSize:20,fontWeight:700,marginBottom:4,color:C.text}}>Call Intelligence</h2>
+    <div style={{fontSize:12,color:C.sub,marginBottom:12}}>AI analysis of transcribed calls, from CallGrid's insight tags and the Kaliper feed. Flag tags (ad source, promises, transfers, dead air) exist only where CallGrid transcription is on; Kaliper-analyzed calls still show their transcript, summary and disposition in the browser.</div>
+    <div style={{display:"flex",gap:10,alignItems:"flex-end",flexWrap:"wrap",marginBottom:12}}>
+      <Field label="From"><Input type="date" value={start} onChange={e=>setStart(e.target.value)}/></Field>
+      <Field label="To"><Input type="date" value={end} onChange={e=>setEnd(e.target.value)}/></Field>
+      <div style={{display:"flex",border:`1px solid ${C.border}`,borderRadius:8,overflow:"hidden",marginBottom:14}}>
+        {[["publisher","Publishers"],["buyer","Buyers"]].map(([id,l])=>
+          <button key={id} onClick={()=>{setSide(id);setSel(null);}} style={{background:side===id?C.accent:"transparent",color:side===id?C.accentFg:C.sub,border:"none",padding:"8px 18px",fontSize:12,fontWeight:700,cursor:"pointer"}}>{l}</button>)}
+      </div>
+      <div style={{marginBottom:14}}><Btn outline onClick={load} disabled={loading} style={{padding:"7px 12px",fontSize:12}}>{loading?"Loading…":"↻ Refresh"}</Btn></div>
+    </div>
+    <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:6}}>
+      {[[null,"Analyzed calls",`${(ai?ai.size:0).toLocaleString()} of ${inRange.length.toLocaleString()}`,C.accent,"connected calls in range"],
+        ["promise","Ad promise flags",String(totals.promise),totals.promise?C.red:C.green,null],
+        ["nontv","Non-TV on TV camps",String(totals.nontv),totals.nontv?C.red:C.green,null],
+        ["transfer","Transfer signs",String(totals.transfer),totals.transfer?C.amber:C.green,null],
+        ["dead","Dead air",String(totals.dead),totals.dead?C.amber:C.green,null],
+      ].map(([k,label,value,color,sub])=>
+        <div key={label} onClick={()=>setFlagFilter(k&&flagFilter!==k?k:null)}
+          style={{cursor:"pointer",borderRadius:16,outline:flagFilter===k&&k?`2px solid ${C.accent}`:"2px solid transparent"}}
+          title={k?"Click to show only these calls in the browser":"Click to clear the filter"}>
+          <KPI label={label} value={value} color={color} sub={flagFilter===k&&k?"filtering the browser ✓":sub||undefined}/>
+        </div>)}
+    </div>
+    <div style={{fontSize:11,color:C.dim,marginBottom:12}}>Click a tile to filter the call browser to just those calls{flagFilter?"; click it again to clear":""}.</div>
+    {ai!==null&&ai.size===0&&<div style={{...card,textAlign:"center",color:C.sub,marginBottom:16}}>No AI-tagged calls in this range yet. Tags collect from Nov 3 forward as the hourly insights sync runs; widen the dates or check back shortly.</div>}
+    {ents.length>0&&<div style={{...card,marginBottom:16}}>
+      <Table cols={[
+        {key:"key",label:side==="publisher"?"Publisher":"Buyer",render:v=><button onClick={()=>setSel(sel===v?null:v)} style={{background:"none",border:"none",color:sel===v?C.accent:C.text,fontWeight:sel===v?700:400,cursor:"pointer",padding:0,fontSize:13,textAlign:"left"}}>{sel===v?"▾ ":""}{v}</button>},
+        {key:"n",label:"Analyzed",right:true,render:v=><span style={mono}>{v.toLocaleString()}</span>},
+        {key:"_nontv",label:"Non-TV (of TV camps)",right:true,render:(_,r)=>pcCell(r.nontv,r.srcTagged,0.1,0.05)},
+        {key:"promise",label:"Ad Promises",right:true,render:v=><span style={{...mono,color:v?C.red:C.dim,fontWeight:v?700:400}}>{v||"—"}</span>},
+        {key:"_tr",label:"Transfers (inbound)",right:true,render:(_,r)=>pcCell(r.transfer,r.trChecked,0.1,0.05)},
+        {key:"_dead",label:"Dead Air (>30s)",right:true,render:(_,r)=>pcCell(r.dead,r.spokeChecked,0.1,0.05)},
+        {key:"enrolled",label:"Enrolled",right:true,render:v=><span style={{...mono,color:v?C.green:C.dim}}>{v||"—"}</span>},
+        {key:"notInt",label:"Not Interested",right:true,render:v=><span style={mono}>{v||"—"}</span>},
+        {key:"dropped",label:"Dropped / Dead",right:true,render:v=><span style={mono}>{v||"—"}</span>},
+        {key:"_cov",label:"Coverage Discussed",right:true,render:(_,r)=>r.covN?<span style={mono}>{Math.round(r.covYes/r.covN*100)}%</span>:<span style={{color:C.dim}}>—</span>},
+      ]} rows={ents} emptyMsg="No data."/>
+      <div style={{fontSize:11,color:C.dim,marginTop:8}}>Click a name to focus the call browser below on it. Non-TV % is of AI-tagged calls on TV campaigns; Transfers is of tagged calls on inbound (non-transfer) campaigns; Dead Air is of tagged calls connected over 30s.</div>
+    </div>}
+    {ai!==null&&ai.size>0&&(()=>{
+      // campaign filter options from the tagged calls
+      const campCount=new Map();
+      for(const [id] of ai){const c=callById.get(id);if(!c)continue;
+        const k=c.campaign_name||"(no campaign)";campCount.set(k,(campCount.get(k)||0)+1);}
+      const campOpts=[...campCount.entries()].sort((a,b)=>b[1]-a[1]);
+      const list=browser.filter(r=>!camp||String(r.c.campaign_name||"(no campaign)")===camp);
+      const cur=list.find(r=>r.id===selCall)||null;
+      const d=cur?(detail[cur.id]||{}):{};
+      const mmss=sec=>{const n=Math.max(0,Math.round(Number(sec)||0));return `${Math.floor(n/60)}:${String(n%60).padStart(2,"0")}`;};
+      const spkColor=sp=>/0/.test(sp)?C.amber:C.accent;
+      const tline=l=>{const m=String(l).match(/^(\d\d:\d\d:\d\d)\s+([^:]+):\s?(.*)$/);
+        return m?{at:m[1],sp:m[2],tx:m[3]}:{at:"",sp:"",tx:l};};
+      const dchip=(t,c,k)=><span key={k||t} style={{fontSize:10,fontWeight:700,color:C.text,background:`${c}22`,border:`1px solid ${c}55`,borderRadius:5,padding:"2px 8px",whiteSpace:"nowrap"}}>{t}</span>;
+      return <div style={card}>
+        <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",marginBottom:10}}>
+          <div style={{fontSize:14,fontWeight:700,color:C.text}}>Call browser {sel?`— ${sel}`:""}{flagFilter?` — ${{nontv:"non-TV callers",promise:"ad promises",transfer:"transfer signs",dead:"dead air"}[flagFilter]} only`:""}</div>
+          {flagFilter&&<Btn outline style={{padding:"3px 10px",fontSize:11}} onClick={()=>setFlagFilter(null)}>Clear filter</Btn>}
+          {sel&&<Btn outline style={{padding:"3px 10px",fontSize:11}} onClick={()=>setSel(null)}>Show all</Btn>}
+          <label style={{display:"flex",gap:6,alignItems:"center",fontSize:12,color:C.sub,cursor:"pointer",marginLeft:"auto"}}>
+            <input type="checkbox" checked={redOnly} onChange={e=>setRedOnly(e.target.checked)}/>Flagged calls only
+          </label>
+        </div>
+        <Field label="Campaign"><Select value={camp} onChange={e=>setCamp(e.target.value)}>
+          <option value="">All campaigns ({browser.length})</option>
+          {campOpts.map(([k,n])=><option key={k} value={k}>{k} ({n})</option>)}
+        </Select></Field>
+        <div style={{display:"flex",gap:16,alignItems:"flex-start",flexWrap:"wrap",marginTop:6}}>
+          <div style={{flex:"1 1 380px",minWidth:340,maxHeight:560,overflowY:"auto",border:`1px solid ${C.border}`,borderRadius:10}}>
+            <table style={{width:"100%",borderCollapse:"separate",borderSpacing:0,fontSize:12}}>
+              <thead><tr>
+                {["Time (ET)","Pub","Buyer","Length","Rev",""].map((h,i)=><th key={i} style={{position:"sticky",top:0,zIndex:2,background:C.surface,textAlign:i>=3&&i<5?"right":"left",padding:"8px 10px",fontSize:11,color:C.sub,fontWeight:700,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}
+              </tr></thead>
+              <tbody>
+                {list.map(r=><tr key={r.id} onClick={()=>selectCall(r.id)} style={{cursor:"pointer",background:selCall===r.id?`${C.accent}1e`:"transparent"}}>
+                  <td style={{padding:"7px 10px",whiteSpace:"nowrap",...mono,color:C.text,borderBottom:`1px solid ${C.border}`}}>{etTime(r.c.call_datetime)}</td>
+                  <td style={{padding:"7px 10px",color:C.text,borderBottom:`1px solid ${C.border}`}}>{r.c.publisher_name||"—"}</td>
+                  <td style={{padding:"7px 10px",color:C.text,borderBottom:`1px solid ${C.border}`}}>{r.c.target_name||"—"}</td>
+                  <td style={{padding:"7px 10px",textAlign:"right",...mono,color:C.text,borderBottom:`1px solid ${C.border}`}}>{mmss(r.c.call_length_seconds)}</td>
+                  <td style={{padding:"7px 10px",textAlign:"right",...mono,color:(r.c.revenue||0)>0?C.green:C.dim,borderBottom:`1px solid ${C.border}`}}>{fmt$(r.c.revenue||0)}</td>
+                  <td style={{padding:"7px 6px",borderBottom:`1px solid ${C.border}`}}>{r.flags.length?<span title={r.flags.map(f=>f[0]).join(", ")}>🚩</span>:null}</td>
+                </tr>)}
+                {!list.length&&<tr><td colSpan={6} style={{padding:16,color:C.dim,textAlign:"center"}}>No analyzed calls match.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          <div style={{flex:"1.2 1 420px",minWidth:360}}>
+            {!cur&&<div style={{border:`1px dashed ${C.border}`,borderRadius:10,padding:40,textAlign:"center",color:C.dim,fontSize:13}}>Click a call to see its summary, tags, transcript and recording.</div>}
+            {cur&&<div>
+              <div style={{fontSize:16,fontWeight:700,color:C.text}}>{cur.c.publisher_name||"?"} → {cur.c.target_name||"(no buyer)"}</div>
+              <div style={{fontSize:12,color:C.sub,margin:"3px 0 10px"}}>{etTime(cur.c.call_datetime)} ET · {mmss(cur.c.call_length_seconds)} · {cur.c.campaign_name||"—"}</div>
+              {d.loading&&<div style={{fontSize:12,color:C.sub}}>Loading transcript…</div>}
+              {d.error&&<div style={{fontSize:12,color:C.red}}>{d.error}</div>}
+              {!d.loading&&!d.error&&<div>
+                {d.recording_url
+                  ?<a href={d.recording_url} target="_blank" rel="noreferrer" style={{display:"inline-flex",alignItems:"center",gap:7,background:C.accent,color:C.accentFg,borderRadius:8,padding:"8px 16px",fontSize:12.5,fontWeight:700,textDecoration:"none",marginBottom:10}}>▶ Play recording</a>
+                  :<div style={{fontSize:11,color:C.dim,marginBottom:10}}>No recording link stored for this call.</div>}
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+                  {cur.a.ad_source&&dchip("Ad source: "+cur.a.ad_source,CI_RED.ad_source.includes(cur.a.ad_source)?C.red:C.sub,"as")}
+                  {cur.a.ad_promise&&cur.a.ad_promise!=="None"&&dchip("Promise: "+cur.a.ad_promise,CI_RED.ad_promise.includes(cur.a.ad_promise)?C.red:C.sub,"ap")}
+                  {cur.a.transfer_signs&&cur.a.transfer_signs!=="None"&&dchip("Transfer: "+cur.a.transfer_signs,C.amber,"ts")}
+                  {cur.a.who_spoke&&dchip("Dead air: "+cur.a.who_spoke,CI_RED.who_spoke.includes(cur.a.who_spoke)?C.amber:C.sub,"ws")}
+                  {cur.a.disposition&&dchip("Ended as: "+cur.a.disposition,C.sub,"dp")}
+                  {cur.a.source==="kaliper"&&dchip("Analyzed by Kaliper",C.dim,"src")}
+                  {cur.a.coverage_discussed&&dchip("Coverage discussed: "+cur.a.coverage_discussed,C.sub,"cd")}
+                </div>
+                {d.summary&&<div style={{fontSize:13,color:C.text,lineHeight:1.6,marginBottom:12}}>{d.summary}</div>}
+                {d.transcript
+                  ?(()=>{
+                    const ev=ciEvFor(cur.a);
+                    const lines=String(d.transcript).split("\n").filter(l=>l.trim()).map(l=>tline(l));
+                    const lineHits=lines.map(t=>ev.filter(e=>e.pats.some(p=>p.test(t.tx))));
+                    const found=new Set();lineHits.forEach(hs=>hs.forEach(e=>found.add(e.col)));
+                    const unsupported=ev.filter(e=>!found.has(e.col));
+                    const nHi=lineHits.filter(h=>h.length).length;
+                    return <div>
+                      {ev.length>0&&<div style={{fontSize:11,marginBottom:8,lineHeight:1.5}}>
+                        {nHi>0&&<span style={{color:C.sub}}>⚑ {nHi} line{nHi===1?"":"s"} highlighted — the wording behind the flag{ev.length>1?"s":""}. </span>}
+                        {unsupported.length>0&&<span style={{color:C.amber,fontWeight:600}}>No supporting wording found for {unsupported.map(e=>e.label).join(" or ")} — likely a soft AI guess, treat with suspicion.</span>}
+                      </div>}
+                      <div style={{maxHeight:380,overflowY:"auto",borderTop:`1px solid ${C.border}`,paddingTop:10}}>
+                        {lines.map((t,i)=>{const hits=lineHits[i];
+                          return <div key={i} style={{display:"flex",gap:10,marginBottom:5,fontSize:12.5,lineHeight:1.5,...(hits.length?{background:hits[0].color+"12",borderLeft:`3px solid ${hits[0].color}`,borderRadius:6,padding:"3px 6px",marginLeft:-6}:{})}}>
+                            <span style={{...mono,fontSize:11,color:C.dim,whiteSpace:"nowrap",paddingTop:1}}>{t.at}</span>
+                            {t.sp&&<span style={{fontWeight:700,color:spkColor(t.sp),whiteSpace:"nowrap"}}>{t.sp}</span>}
+                            <span style={{color:C.text}}>{ciHiSpans(t.tx,hits,C)}</span>
+                          </div>;})}
+                      </div>
+                    </div>;})()
+                  :<div style={{fontSize:12,color:C.dim}}>No transcript stored for this call.</div>}
+              </div>}
+            </div>}
+          </div>
+        </div>
+        <div style={{fontSize:11,color:C.dim,marginTop:10}}>{list.length} calls (newest first, max 300). Recordings open in CallGrid and need a CallGrid sign-in.</div>
+      </div>;})()}
+  </div>;
+}
+
 function PingsBids(){
   const etD=new Intl.DateTimeFormat("en-CA",{timeZone:"America/New_York",year:"numeric",month:"2-digit",day:"2-digit"});
   const today=etD.format(new Date());
   const ago=n=>{const d=new Date();d.setDate(d.getDate()-n);return etD.format(d);};
   const [tab,setTab]=usePersistentState("pb_tab","summary");
-  const [start,setStart]=useState(()=>ago(6));
-  const [end,setEnd]=useState(today);
+  const [start,end,setStart,setEnd]=usePersistentRange("pb_range",7);
   const [rows,setRows]=useState([]);           // hourly aggregates
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState("");
-  const [groupBy,setGroupBy]=usePersistentState("pb_group","destination"); // destination | buyer
-  const [grain,setGrain]=usePersistentState("pb_grain","day");
+  const [grain,setGrain]=usePersistentState("pb_grain2","destination"); // destination | hour | day | week | month
   const [openKey,setOpenKey]=useState(null);
   async function load(){
     setLoading(true);
@@ -10302,7 +11561,8 @@ function PingsBids(){
     setLoading(false);
   }
   useEffect(()=>{load();},[start,end]);
-  const keyOf=r=>groupBy==="buyer"?(r.buyer_name||"(unknown buyer)"):(r.destination_name||r.destination_id||"(unknown)");
+  const keyOf=r=>r.buyer_name||"(unknown buyer)";
+  const destOf=r=>r.destination_name||r.destination_id||"(unknown)";
   const Z=()=>({pings:0,accepted:0,bids:0,bid_amount_sum:0,bid_duration_sum:0,won_bids:0,won_calls:0,timeouts:0,ping_ms_sum:0,ping_ms_bid_sum:0,timeout_bids:0,timeout_bid_amount_sum:0,timeout_bid_ping_ms_sum:0});
   const FIELDS=Object.keys(Z());
   const addR=(a,r)=>{for(const f of FIELDS)a[f]+=Number(r[f]||0);return a;};
@@ -10310,7 +11570,8 @@ function PingsBids(){
     for(const r of list){const k=keyFn(r);let a=m.get(k);if(!a){a=Z();a.key=k;m.set(k,a);}addR(a,r);}
     return [...m.values()];};
   const monOf=ds=>{const d=parseLocalDate(ds);const off=(d.getDay()+6)%7;d.setDate(d.getDate()-off);return toDateStr(d);};
-  const grainKey=r=>grain==="hour"?`${r.date} ${String(r.hour).padStart(2,"0")}:00`
+  const grainKey=r=>grain==="destination"?destOf(r)
+    :grain==="hour"?`${r.date} ${String(r.hour).padStart(2,"0")}:00`
     :grain==="day"?String(r.date)
     :grain==="week"?"Wk of "+fmtShort(monOf(String(r.date)))
     :String(r.date).slice(0,7);
@@ -10345,13 +11606,28 @@ function PingsBids(){
   const [exErr,setExErr]=useState("");
   const [exOpen,setExOpen]=useState(null);
   const [exOffset,setExOffset]=useState(0);
-  const [f,setF]=usePersistentState("pb_filters",{buyer:"",dest:"",source:"",state:"",minBid:"",wonOnly:false,callWonOnly:false,lateOnly:false});
+  const [exporting,setExporting]=useState(false);
+  const [sources,setSources]=useState([]); // distinct source names seen in recent bid rows
+  const [f,setF]=usePersistentState("pb_filters2",{buyer:"",dest:"",source:"",state:"",minBid:"",wonOnly:false,callWonOnly:false,lateOnly:false});
   const fSet=(k,v)=>setF(x=>({...x,[k]:v}));
-  function exQuery(offset){
-    let q=`ping_bids?select=*&date=gte.${start}&date=lte.${end}&order=ts.desc&limit=200&offset=${offset}`;
-    if(f.buyer.trim())q+=`&buyer_name=ilike.${encodeURIComponent("*"+f.buyer.trim()+"*")}`;
-    if(f.dest.trim())q+=`&destination_name=ilike.${encodeURIComponent("*"+f.dest.trim()+"*")}`;
-    if(f.source.trim())q+=`&source_name=ilike.${encodeURIComponent("*"+f.source.trim()+"*")}`;
+  // dropdown options: buyers and destinations from the loaded hourly rows
+  // (full coverage of the range), sources from the most recent bid rows
+  const buyerOpts=[...new Set(rows.map(r=>r.buyer_name).filter(Boolean))].sort();
+  const destOpts=[...new Set(rows.filter(r=>!f.buyer||r.buyer_name===f.buyer).map(r=>r.destination_name).filter(Boolean))].sort();
+  useEffect(()=>{if(tab!=="explorer")return;let dead=false;
+    sb("GET",`ping_bids?select=source_name&date=gte.${start}&date=lte.${end}&order=ts.desc&limit=3000`)
+      .then(r=>{if(!dead)setSources([...new Set((r||[]).map(x=>x.source_name).filter(Boolean))].sort());})
+      .catch(()=>{});
+    return ()=>{dead=true;};
+  },[tab,start,end]);
+  function exQuery(offset,limit){
+    let q=`ping_bids?select=*&date=gte.${start}&date=lte.${end}&order=ts.desc&limit=${limit||200}&offset=${offset}`;
+    const kind=f.kind||"bid";
+    if(kind==="bid")q+="&has_bid=is.true";
+    else if(kind==="nobid")q+="&has_bid=is.false";
+    if(f.buyer)q+=`&buyer_name=eq.${encodeURIComponent(f.buyer)}`;
+    if(f.dest)q+=`&destination_name=eq.${encodeURIComponent(f.dest)}`;
+    if(f.source)q+=`&source_name=eq.${encodeURIComponent(f.source)}`;
     if(f.state.trim())q+=`&state_code=ilike.${encodeURIComponent(f.state.trim())}`;
     if(Number(f.minBid)>0)q+=`&bid_amount=gte.${Number(f.minBid)}`;
     if(f.wonOnly)q+="&won_bid=is.true";
@@ -10370,6 +11646,64 @@ function PingsBids(){
     setExLoading(false);
   }
   useEffect(()=>{if(tab==="explorer")loadEx(false);},[tab]);
+
+  // ── exports ──
+  const xn=v=>({v:Math.round(Number(v)||0),t:"n"});
+  const x$=v=>v==null?{v:"—"}:{v:Number(v),t:"n",s:XS.CUR};
+  function sumRow(e,label){
+    return [{v:label??e.key},xn(e.pings),xn(e.bids),{v:e.pings?Math.round(e.bids/e.pings*100)+"%":"—"},
+      x$(avg(e.bid_amount_sum,e.bids)),{v:avg(e.bid_duration_sum,e.bids)!=null?Math.round(avg(e.bid_duration_sum,e.bids))+"s":"—"},
+      xn(e.won_bids),{v:e.bids?Math.round(e.won_bids/e.bids*100)+"%":"—"},xn(e.won_calls),
+      xn(avg(e.ping_ms_sum,e.pings)),xn(avg(e.ping_ms_bid_sum,e.bids)),xn(e.timeout_bids),xn(e.accepted),xn(e.timeouts)];
+  }
+  const SUM_HEADS=["Name","Pings","Bids","Bid %","Avg Bid","Avg Bid Dur","Winning Bids","Win % of Bids","Calls Won","Resp ms (all)","Resp ms (bids)","Late Bids","Accepted","Timeouts"];
+  function exportSummary(){
+    const r1=rptScaffold(SUM_HEADS.length);
+    r1.title("Pings & Bids — Buyer Summary",`${fmtShort(start)} – ${fmtShort(end)} · exported ${new Date().toLocaleString("en-US",{timeZone:"America/New_York"})} ET`);
+    r1.section("BY BUYER");r1.thead(SUM_HEADS);
+    for(const e of entities)r1.trow(sumRow(e));
+    if(totals)r1.trow(sumRow({...totals,key:"TOTAL"}).map(c=>({...c,s:c.s===XS.CUR?XS.TOTCUR:XS.TOTBOLD})));
+    const r2=rptScaffold(SUM_HEADS.length+1);
+    r2.title("Pings & Bids — Buyer Targets","Every destination, grouped under its buyer");
+    r2.section("BY BUYER TARGET");r2.thead(["Buyer",...SUM_HEADS].map((h,i)=>i===1?"Buyer Target":h));
+    for(const e of entities){
+      const subs=rollup(rows.filter(r=>keyOf(r)===e.key),destOf).sort((a,b)=>b.bids-a.bids||b.pings-a.pings);
+      for(const s of subs)r2.trow([{v:e.key},...sumRow(s)]);
+    }
+    const r3=rptScaffold(SUM_HEADS.length);
+    r3.title("Pings & Bids — Daily","Whole account, by day");
+    r3.section("BY DAY");r3.thead(["Date",...SUM_HEADS.slice(1)]);
+    for(const d of rollup(rows,r=>String(r.date)).sort((a,b)=>String(a.key).localeCompare(String(b.key))))r3.trow(sumRow(d));
+    downloadXLSXSheets(`Pings_Bids_Summary_${start}_to_${end}.xlsx`,[
+      {name:"Buyers",rows:r1.rows,merges:r1.merges,colWidths:[34,10,10,8,10,12,13,13,11,13,14,10,10,10]},
+      {name:"Buyer Targets",rows:r2.rows,merges:r2.merges,colWidths:[26,44,10,10,8,10,12,13,13,11,13,14,10,10,10]},
+      {name:"Daily",rows:r3.rows,merges:r3.merges,colWidths:[14,10,10,8,10,12,13,13,11,13,14,10,10,10]},
+    ]);
+  }
+  async function exportExplorer(){
+    setExporting(true);setExErr("");
+    try{
+      const all=[];let off=0;
+      while(all.length<10000){
+        const got=await sb("GET",exQuery(off,1000))||[];
+        all.push(...got);
+        if(got.length<1000)break;
+        off+=1000;
+      }
+      const HEADS=["Time (ET)","Date","Hour","Buyer","Buyer Target","Campaign","Source","Vendor","State","Caller ID","Bid $","Bid Dur","Resp ms","Ping Code","Accepted","Won Bid","Call Won","After Timeout","Revenue $"];
+      const r=rptScaffold(HEADS.length);
+      r.title("Ping Explorer Export",`${fmtShort(start)} – ${fmtShort(end)} · ${all.length.toLocaleString()} rows${all.length>=10000?" (capped at 10,000 — tighten filters for more)":""} · filters: ${[f.buyer&&"buyer="+f.buyer,f.dest&&"target="+f.dest,f.source&&"source="+f.source,f.state&&"state="+f.state,Number(f.minBid)>0&&"min bid $"+f.minBid,f.wonOnly&&"winning only",f.callWonOnly&&"calls won only",f.lateOnly&&"after-timeout only"].filter(Boolean).join(", ")||"none"}`);
+      r.thead(HEADS);
+      for(const b of all)r.trow([
+        {v:etTime(b.ts)},{v:String(b.date)},xn(b.hour),{v:b.buyer_name||""},{v:b.destination_name||""},
+        {v:b.campaign_name||""},{v:b.source_name||""},{v:b.vendor_name||""},{v:b.state_code||""},{v:b.caller_id||""},
+        x$(b.bid_amount),{v:b.bid_duration!=null?b.bid_duration+"s":""},xn(b.ping_ms),{v:b.ping_code!=null?String(b.ping_code):""},
+        {v:b.accepted?"Y":""},{v:b.won_bid?"Y":""},{v:b.won_call?"Y":""},{v:b.ping_timeout?"Y":""},x$(b.revenue_amount)]);
+      downloadXLSXSheets(`Ping_Explorer_${start}_to_${end}.xlsx`,[{name:"Pings",rows:r.rows,merges:r.merges,
+        colWidths:[20,11,6,24,40,30,20,18,6,15,9,8,9,10,9,8,9,13,10]}]);
+    }catch(e){setExErr(String(e.message||e));}
+    setExporting(false);
+  }
   const etTime=ts=>{try{return new Date(ts).toLocaleString("en-US",{timeZone:"America/New_York",month:"short",day:"numeric",hour:"numeric",minute:"2-digit",second:"2-digit"});}catch{return ts;}};
   const chip=(t,c)=><span key={t} style={{fontSize:9,fontWeight:700,color:c,border:`1px solid ${c}`,borderRadius:4,padding:"1px 5px",marginLeft:5,whiteSpace:"nowrap"}}>{t}</span>;
 
@@ -10388,29 +11722,29 @@ function PingsBids(){
 
     {tab==="summary"&&<div>
       <div style={{display:"flex",gap:10,alignItems:"flex-end",flexWrap:"wrap",marginBottom:10}}>
-        <Field label="Rows are"><Select value={groupBy} onChange={e=>{setGroupBy(e.target.value);setOpenKey(null);}}>
-          <option value="destination">Buyer Targets (destinations)</option>
-          <option value="buyer">Buyers</option>
-        </Select></Field>
-        <Field label="Breakdown inside each row"><Select value={grain} onChange={e=>setGrain(e.target.value)}>
+        <Field label="Expanding a buyer shows"><Select value={grain} onChange={e=>setGrain(e.target.value)}>
+          <option value="destination">Buyer targets (destinations)</option>
           <option value="hour">By hour</option><option value="day">By day</option>
           <option value="week">By week</option><option value="month">By month</option>
         </Select></Field>
         <div style={{marginBottom:14}}><Btn outline onClick={load} style={{padding:"7px 12px",fontSize:12}}>↻ Refresh</Btn></div>
+        <div style={{marginBottom:14}}><Btn outline onClick={exportSummary} style={{padding:"7px 12px",fontSize:12}}>⬇ Export</Btn></div>
       </div>
       {loading?<div style={{color:C.dim,fontSize:13}}>Loading…</div>:
        !entities.length?<div style={{...card,textAlign:"center",color:C.sub}}>No ping data in this range yet. Data collects going forward from v5; use the backfill loop for recent history.</div>:
        <div style={card}>
-        <Table cols={metricCols(groupBy==="buyer"?"Buyer":"Buyer Target",true)}
+        <Table cols={metricCols("Buyer",true)}
           rows={totals?[...entities,{...totals,key:"— TOTAL —"}]:entities}
           expandedRow={openKey}
           renderExpanded={row=>{
             if(row.key==="— TOTAL —")return null;
             const sub=rollup(rows.filter(r=>keyOf(r)===row.key),grainKey)
-              .sort((a,b)=>String(a.key).localeCompare(String(b.key)));
+              .sort(grain==="destination"
+                ?(a,b)=>b.bids-a.bids||b.pings-a.pings
+                :(a,b)=>String(a.key).localeCompare(String(b.key)));
             return <div style={{padding:"8px 16px 16px 32px",background:"rgba(255,255,255,0.02)"}}>
-              <div style={{fontSize:11,color:C.sub,textTransform:"uppercase",letterSpacing:"0.06em",margin:"8px 0"}}>{row.key} · by {grain}</div>
-              <Table cols={metricCols(grain[0].toUpperCase()+grain.slice(1),false)} rows={sub} emptyMsg="No data."/>
+              <div style={{fontSize:11,color:C.sub,textTransform:"uppercase",letterSpacing:"0.06em",margin:"8px 0"}}>{row.key} · {grain==="destination"?"by buyer target":"by "+grain}</div>
+              <Table cols={metricCols(grain==="destination"?"Buyer Target":grain[0].toUpperCase()+grain.slice(1),false)} rows={sub} emptyMsg="No data."/>
             </div>;
           }}
           emptyMsg="No data."/>
@@ -10421,9 +11755,23 @@ function PingsBids(){
     {tab==="explorer"&&<div>
       <div style={{...card,marginBottom:12}}>
         <div style={{display:"flex",gap:10,alignItems:"flex-end",flexWrap:"wrap"}}>
-          <Field label="Buyer contains"><Input value={f.buyer} onChange={e=>fSet("buyer",e.target.value)} placeholder="e.g. Clarifying"/></Field>
-          <Field label="Destination contains"><Input value={f.dest} onChange={e=>fSet("dest",e.target.value)}/></Field>
-          <Field label="Source contains"><Input value={f.source} onChange={e=>fSet("source",e.target.value)}/></Field>
+          <Field label="Ping type"><Select value={f.kind||"bid"} onChange={e=>fSet("kind",e.target.value)}>
+            <option value="bid">With a bid (30 days)</option>
+            <option value="nobid">No bid (last 3 days)</option>
+            <option value="all">All pings</option>
+          </Select></Field>
+          <Field label="Buyer"><Select value={f.buyer} onChange={e=>{const v=e.target.value;setF(x=>({...x,buyer:v,dest:""}));}}>
+            <option value="">All buyers</option>
+            {buyerOpts.map(b=><option key={b} value={b}>{b}</option>)}
+          </Select></Field>
+          <Field label="Buyer target"><Select value={f.dest} onChange={e=>fSet("dest",e.target.value)}>
+            <option value="">All targets</option>
+            {destOpts.map(d=><option key={d} value={d}>{d}</option>)}
+          </Select></Field>
+          <Field label="Source"><Select value={f.source} onChange={e=>fSet("source",e.target.value)}>
+            <option value="">All sources</option>
+            {sources.map(s=><option key={s} value={s}>{s}</option>)}
+          </Select></Field>
           <Field label="State"><Input value={f.state} onChange={e=>fSet("state",e.target.value)} placeholder="TN" style={undefined}/></Field>
           <Field label="Min bid $"><Input type="number" value={f.minBid} onChange={e=>fSet("minBid",e.target.value)}/></Field>
           <div style={{display:"flex",gap:14,marginBottom:14,flexWrap:"wrap"}}>
@@ -10431,7 +11779,10 @@ function PingsBids(){
               <label key={k} style={{display:"flex",gap:6,alignItems:"center",fontSize:12,color:C.sub,cursor:"pointer"}}>
                 <input type="checkbox" checked={!!f[k]} onChange={e=>fSet(k,e.target.checked)}/>{l}</label>)}
           </div>
-          <div style={{marginBottom:14}}><Btn onClick={()=>loadEx(false)} disabled={exLoading}>{exLoading?"Loading…":"Apply filters"}</Btn></div>
+          <div style={{marginBottom:14,display:"flex",gap:8}}>
+            <Btn onClick={()=>loadEx(false)} disabled={exLoading}>{exLoading?"Loading…":"Apply filters"}</Btn>
+            <Btn outline onClick={exportExplorer} disabled={exporting}>{exporting?"Exporting…":"⬇ Export"}</Btn>
+          </div>
         </div>
       </div>
       {exErr&&<div style={{color:C.red,fontSize:12,marginBottom:10}}>{exErr}</div>}
@@ -10450,7 +11801,8 @@ function PingsBids(){
             {r.won_call?chip("CALL WON",C.green):r.won_bid?chip("WON BID",C.green):null}
             {r.accepted&&!r.won_bid?chip("ACCEPTED",C.accent):null}
             {r.ping_timeout?chip("AFTER TIMEOUT",C.amber):null}
-            {!r.won_bid&&!r.accepted&&!r.ping_timeout?chip("LOST",C.dim):null}
+            {r.bid_amount==null&&!r.won_bid&&!r.won_call?chip("NO BID",C.dim)
+              :!r.won_bid&&!r.accepted&&!r.ping_timeout?chip("LOST",C.dim):null}
           </span>},
         ]} rows={ex} expandedRow={exOpen}
           renderExpanded={r=><div style={{padding:"10px 18px 16px",background:"rgba(255,255,255,0.02)"}}>
@@ -10461,9 +11813,9 @@ function PingsBids(){
               </div>)}
             </div>
           </div>}
-          emptyMsg={exLoading?"Loading…":"No bid pings match these filters in this range."}/>
+          emptyMsg={exLoading?"Loading…":"No pings match these filters in this range."}/>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:10}}>
-          <span style={{fontSize:11,color:C.dim}}>{ex.length} rows shown · newest first · bid pings only (raw rows keep 30 days)</span>
+          <span style={{fontSize:11,color:C.dim}}>{ex.length} rows shown · newest first · bid rows keep 30 days, no-bid rows keep 3 days</span>
           {ex.length>=200+exOffset&&<Btn outline onClick={()=>loadEx(true)} disabled={exLoading} style={{padding:"6px 12px",fontSize:12}}>Load 200 more</Btn>}
         </div>
       </div>
@@ -11305,7 +12657,7 @@ function CreativeLabs({user}){
 // Bullet rows with % chips, target attainment from each campaign's Daily
 // Call Target, and click-to-drill into campaigns and source/destination
 // pairs. Downloadable as a styled workbook.
-function StateOfUnion({data}){
+function StateOfUnion({data,user}){
   const calls=data.callgridCalls||[];
   const clients=data.clients||[], pubs=data.publishers||[];
   const ccs=data.clientCampaigns||[], pcs=data.publisherCampaigns||[];
@@ -11313,6 +12665,36 @@ function StateOfUnion({data}){
   const [view,setView]=usePersistentState("sotu_view","week"); // day | week
   const [showSteady,setShowSteady]=useState(false);
   const [open,setOpen]=useState(null);
+  const [pbToday,setPbToday]=useState(null); // today's hourly ping rows, for the buyer shut-off board
+  const [launchSide,setLaunchSide]=usePersistentState("sotu_launch_side","all"); // all | Buyer | Publisher
+  const [launchSort,setLaunchSort]=usePersistentState("sotu_launch_sort","status"); // status | launch | created
+  const [launchInactive,setLaunchInactive]=usePersistentState("sotu_launch_inactive",false);
+  const [launchMonth,setLaunchMonth]=usePersistentState("sotu_launch_month","recent"); // recent (21d+upcoming) | YYYY-MM
+  const [launchQ,setLaunchQ]=useState("");
+  const [launchOnly,setLaunchOnly]=usePersistentState("sotu_launch_only","all"); // all | nocalls | setup
+  const [openLaunch,setOpenLaunch]=useState(null); // expanded launch row key
+  const [launchNotes,setLaunchNotes]=useState({}); // key -> {note,noted_by,noted_at,expected}
+  const [noteDraft,setNoteDraft]=useState(null); // {key,note}
+  const [noteBusy,setNoteBusy]=useState(false);
+  const loadLaunchNotes=React.useCallback(async()=>{
+    try{const r=await sbAll("launch_notes?select=*");setLaunchNotes(Object.fromEntries((r||[]).map(n=>[n.key,n])));}
+    catch(e){/* pre-migration */}
+  },[]);
+  useEffect(()=>{loadLaunchNotes();},[loadLaunchNotes]);
+  async function saveLaunchNote(key,note){
+    setNoteBusy(true);
+    try{
+      if(note&&note.trim()){
+        const row={note:note.trim(),noted_by:user?.email||null,noted_at:new Date().toISOString(),expected:true};
+        if(launchNotes[key])await sb("PATCH",`launch_notes?key=eq.${encodeURIComponent(key)}`,row);
+        else await sb("POST","launch_notes",{key,...row});
+      }else{
+        await sb("DELETE",`launch_notes?key=eq.${encodeURIComponent(key)}`);
+      }
+      setNoteDraft(null);await loadLaunchNotes();
+    }catch(e){alert(`Could not save the note: ${e?.message||e}`);}
+    setNoteBusy(false);
+  }
 
   // ET week windows
   const etD=new Intl.DateTimeFormat("en-CA",{timeZone:"America/New_York",year:"numeric",month:"2-digit",day:"2-digit"});
@@ -11324,14 +12706,27 @@ function StateOfUnion({data}){
   let A,B,label;
   if(mode==="wtd"){
     A=[thisMon,today]; B=[shift(thisMon,-7),shift(today,-7)];
-    label=`Week to date (${fmtShort(A[0])} – ${fmtShort(A[1])}) vs same days last week (${fmtShort(B[0])} – ${fmtShort(B[1])})`;
+    label=`Week to date (${fmtShort(A[0])} – ${fmtShort(A[1])}) vs same days last week (${fmtShort(B[0])} – ${fmtShort(B[1])}), with last ${new Date().toLocaleDateString("en-US",{weekday:"long",timeZone:"America/New_York"})} cut at the current time of day`;
   }else{
     A=[shift(thisMon,-7),shift(thisMon,-1)]; B=[shift(thisMon,-14),shift(thisMon,-8)];
     label=`Last full week (${fmtShort(A[0])} – ${fmtShort(A[1])}) vs prior (${fmtShort(B[0])} – ${fmtShort(B[1])})`;
   }
+  // ET clock-time helpers (used for like-for-like time cuts below)
+  const minFmt=new Intl.DateTimeFormat("en-US",{timeZone:"America/New_York",hour12:false,hour:"2-digit",minute:"2-digit"});
+  const minsOf=dte=>{const p=minFmt.formatToParts(dte);const g=t=>Number(p.find(x=>x.type===t)?.value||0);return (g("hour")%24)*60+g("minute");};
+  const nowMin=minsOf(new Date());
+  const minCache=new Map();
+  const callMin=c=>{const k=c.call_datetime;if(!k)return 0;let v=minCache.get(k);
+    if(v==null){try{v=minsOf(new Date(k));}catch{v=0;}minCache.set(k,v);}return v;};
+
+  // elapsed business days: today counts as its clock-time fraction, not a
+  // full day, so pace and target attainment read true mid-day
   let elapsedBD=0;
-  for(let d=A[0];d<=A[1];d=shift(d,1)){const w=dowOf(d);if(w>=1&&w<=5)elapsedBD++;}
-  elapsedBD=Math.max(1,elapsedBD);
+  for(let d=A[0];d<=A[1];d=shift(d,1)){
+    const w=dowOf(d);if(w<1||w>5)continue;
+    elapsedBD+=(mode==="wtd"&&d===A[1])?Math.min(1,Math.max(0.1,nowMin/1440)):1;
+  }
+  elapsedBD=Math.max(0.2,elapsedBD);
 
   // aggregate one side (buyers or publishers)
   const dOf=c=>String(c.date||"").slice(0,10);
@@ -11339,7 +12734,10 @@ function StateOfUnion({data}){
     const m=new Map();
     for(const c of calls){
       const d=dOf(c);
-      const w=assign?assign(c,d):((d>=A[0]&&d<=A[1])?"a":(d>=B[0]&&d<=B[1])?"b":null);
+      let w=assign?assign(c,d):((d>=A[0]&&d<=A[1])?"a":(d>=B[0]&&d<=B[1])?"b":null);
+      // like-for-like time cut: in week-to-date, last week's version of
+      // TODAY only counts through the current clock time
+      if(!assign&&w==="b"&&mode==="wtd"&&d===B[1]&&callMin(c)>nowMin)w=null;
       if(!w)continue;
       const k=keyFn(c); if(!k)continue;
       let o=m.get(k);
@@ -11356,17 +12754,11 @@ function StateOfUnion({data}){
 
   // ── intraday: today vs the average of the previous 10 same-type days
   // (weekday vs weekdays, weekend vs weekend days), through this time ──
-  const minFmt=new Intl.DateTimeFormat("en-US",{timeZone:"America/New_York",hour12:false,hour:"2-digit",minute:"2-digit"});
-  const minsOf=dte=>{const p=minFmt.formatToParts(dte);const g=t=>Number(p.find(x=>x.type===t)?.value||0);return (g("hour")%24)*60+g("minute");};
-  const nowMin=minsOf(new Date());
   const isWkend=ds=>{const w=dowOf(ds);return w===0||w===6;};
   const baseDays=(()=>{const out=[];let d=shift(today,-1),guard=0;
     while(out.length<10&&guard<60){if(isWkend(d)===isWkend(today))out.push(d);d=shift(d,-1);guard++;}
     return out;})();
   const baseSet=new Set(baseDays);
-  const minCache=new Map();
-  const callMin=c=>{const k=c.call_datetime;if(!k)return 0;let v=minCache.get(k);
-    if(v==null){try{v=minsOf(new Date(k));}catch{v=0;}minCache.set(k,v);}return v;};
   const assignDay=(c,d)=>{const w=d===today?"a":baseSet.has(d)?"b":null;
     return w&&callMin(c)<=nowMin?w:null;};
   const scaleAvg=list=>{const nb=Math.max(1,baseDays.length);
@@ -11505,7 +12897,10 @@ function StateOfUnion({data}){
   // next 14, with first-call time, pace since launch, and setup gaps ──
   const launches=(()=>{
     const nowH=Number(new Intl.DateTimeFormat("en-US",{timeZone:"America/New_York",hour:"numeric",hour12:false}).format(new Date()))||0;
-    const cut=shift(today,-21), ahead=shift(today,14);
+    // window: "recent" = last 21 days + upcoming; a month = that whole month
+    const monthPick=/^\d{4}-\d{2}$/.test(launchMonth)?launchMonth:null;
+    const cut=monthPick?`${monthPick}-01`:shift(today,-30);
+    const ahead=monthPick?`${monthPick}-31`:shift(today,14);
     const perKey=new Map(); // "c<id>"/"p<id>" -> Map(date -> {n,bill,rev}), plus first call
     const first=new Map();
     for(const c of calls){
@@ -11520,14 +12915,29 @@ function StateOfUnion({data}){
       }
     }
     const out=[];
-    const consider=(side,camp,parentName,rate,cgLink)=>{
-      const sd=String(camp.start_date||"").slice(0,10);
-      if(!sd||sd<cut||sd>ahead||camp.active===false)return;
+    const consider=(side,camp,parentName,rate,cgLink,extra)=>{
+      const sd0=String(camp.start_date||"").slice(0,10);
+      if(!sd0)return;
+      const inactive=camp.active===false;
+      if(inactive&&!launchInactive)return;
       const k=(side==="Buyer"?"c":"p")+camp.id;
       const dm=perKey.get(k)||new Map();
+      const f=first.get(k)||null;
+      // launch date, CallGrid-truth order: with calls, the earlier of the
+      // stored start date and the real first call; without calls, a planned
+      // future date stands, else CallGrid's own campaign created date, else
+      // the stored date. The stored date alone is often just when the
+      // dashboard row was auto-created, which is not a launch.
+      const cgS=extra?.cgStart&&String(extra.cgStart).slice(0,10)<=today?String(extra.cgStart).slice(0,10):null;
+      const sd=f?(f.d<sd0?f.d:sd0):(sd0>today?sd0:(cgS||sd0));
+      if(sd>ahead)return;
       let n=0,bill=0,rev=0;
       for(const [d,o] of dm){if(d>=sd){n+=o.n;bill+=o.bill;rev+=o.rev;}}
-      const f=first.get(k)||null;
+      // window: a month shows that month; otherwise the last 30 days show
+      // regardless of calls, and OLDER launches stay visible only while they
+      // still have zero calls (they drop off on their first call)
+      if(monthPick){if(sd<cut)return;}
+      else if(sd<cut&&n>0)return;
       let bd=0;for(let d=sd;d<=today;d=shift(d,1)){const w=dowOf(d);if(w>=1&&w<=5)bd++;}
       bd=Math.max(1,bd);
       const target=Number(camp.daily_call_target)||null;
@@ -11541,22 +12951,47 @@ function StateOfUnion({data}){
         if(attain<0.5)chips.push({t:"SLOW START "+Math.round(attain*100)+"% OF TARGET",c:C.amber});
         else if(attain>=0.9)chips.push({t:"ON TRACK "+Math.round(attain*100)+"%",c:C.green});
         else chips.push({t:"RAMPING "+Math.round(attain*100)+"%",c:C.accent});
-      }else if(n>0)chips.push({t:"LIVE",c:C.green});
+      } // live state shows in the Status column, not as a chip
       const gaps=[];
       if(rate==null||rate==="")gaps.push("no rate");
       if(!target)gaps.push("no daily target");
       if(!cgLink)gaps.push("no CallGrid link");
       for(const g of gaps)chips.push({t:"SETUP: "+g.toUpperCase(),c:C.amber});
-      out.push({side,name:camp.name,parent:parentName,created:String(camp.created_at||"").slice(0,10)||null,
-        launch:sd,first:f,n,bill,rev,chips,
-        bad:chips.some(x=>x.c===C.red)?0:chips.some(x=>x.c===C.amber)?1:2});
+      if(inactive)chips.unshift({t:"INACTIVE",c:C.muted});
+      const daily=[...dm.entries()].filter(([d])=>d>=shift(today,-13)).sort((x,y)=>y[0].localeCompare(x[0])).map(([d,o])=>({d,...o}));
+      out.push({key:k,side,name:camp.name,parent:parentName,created:String(camp.created_at||"").slice(0,10)||null,
+        dest:extra?.dest||null,cgStart:extra?.cgStart||null,cgStatus:extra?.cgStatus||null,
+        dashStart:sd!==sd0?sd0:null,
+        launch:sd,first:f,n,bill,rev,chips,inactive,target,rate:rate!=null&&rate!==""?Number(rate):null,
+        vertical:camp.vertical||null,lead:camp.lead_type||null,dur:camp.duration_seconds||null,
+        freq:camp.billing_frequency||null,net:camp.net_terms,cg:cgLink||null,daily,
+        bad:inactive?3:chips.some(x=>x.c===C.red)?0:chips.some(x=>x.c===C.amber)?1:2});
     };
-    for(const cc of ccs){const cl=clients.find(x=>x.id===cc.client_id);consider("Buyer",cc,cl?cl.name:"?",cc.price_per_call,cc.callgrid_campaign_name||cc.callgrid_target_name);}
-    for(const pcx of pcs){const pb=pubs.find(x=>x.id===pcx.publisher_id);consider("Publisher",pcx,pb?pb.name:"?",pcx.cost_per_call,pcx.callgrid_publisher_name);}
+    for(const cc of ccs){const cl=clients.find(x=>x.id===cc.client_id);consider("Buyer",cc,cl?cl.name:"?",cc.price_per_call,cc.callgrid_campaign_name||cc.callgrid_target_name,{dest:cc.cg_destinations||cc.callgrid_target_name||null,cgStart:cc.cg_created_at?String(cc.cg_created_at).slice(0,10):null,cgStatus:cc.cg_status||null});}
+    for(const pcx of pcs){const pb=pubs.find(x=>x.id===pcx.publisher_id);consider("Publisher",pcx,pb?pb.name:"?",pcx.cost_per_call,pcx.callgrid_publisher_name,{dest:pcx.callgrid_publisher_name||null,cgStart:pcx.cg_created_at?String(pcx.cg_created_at).slice(0,10):null,cgStatus:pcx.cg_status||null});}
     out.sort((a,b)=>a.bad-b.bad||(b.launch<a.launch?-1:1));
     return out;
   })();
+  const lq=launchQ.trim().toLowerCase();
+  const launchView=launches
+    .filter(l=>launchSide==="all"||l.side===launchSide)
+    .filter(l=>!lq||[l.parent,l.name,l.cg].some(x=>String(x||"").toLowerCase().includes(lq)))
+    .filter(l=>launchOnly==="nocalls"?(l.n===0&&l.launch<=today):true)
+    .sort(launchSort==="launch"?(a,b)=>String(b.launch).localeCompare(String(a.launch))||String(a.parent).localeCompare(String(b.parent))
+      :launchSort==="created"?(a,b)=>String(b.created||b.launch||"").localeCompare(String(a.created||a.launch||""))
+      :(a,b)=>a.bad-b.bad||(b.launch<a.launch?-1:1));
   const etTime=dt=>{try{return new Date(dt).toLocaleTimeString("en-US",{timeZone:"America/New_York",hour:"numeric",minute:"2-digit"});}catch{return "";}};
+
+  // today's hourly ping data (for the Day view shut-off board)
+  const nowHourSOTU=Math.floor(nowMin/60);
+  useEffect(()=>{let dead=false;
+    if(view!=="day"){return;}
+    sbAll(`ping_bid_hourly?date=eq.${today}&select=hour,buyer_name,pings,accepted,won_calls`)
+      .then(r=>{if(!dead)setPbToday(r||[]);})
+      .catch(()=>{if(!dead)setPbToday([]);});
+    return ()=>{dead=true;};
+  },[view,today]);
+  const hLab=h=>`${((h+11)%12)+1} ${h<12?"AM":"PM"}`;
 
   const wowT=tB.rev>0?(tA.rev-tB.rev)/tB.rev:null;
   return <div>
@@ -11583,6 +13018,98 @@ function StateOfUnion({data}){
           sub={pfRev?`${pc100((proj-pfRev)/pfRev)} vs last full week (${fmt$(pfRev)})`:"projected from weekdays elapsed"}/>;
       })()}
     </div>
+    {view==="day"&&(()=>{
+      // ── intraday pace: today's revenue by hour against the same hour's
+      // average over the last 10 same-type days; future hours show the
+      // average only, so the chart also reads as "what the rest of an
+      // average day brings" ──
+      const tH=new Map(),bH=new Map();
+      for(const c of calls){const d=dOf(c);
+        if(d===today){const h=Math.floor(callMin(c)/60);tH.set(h,(tH.get(h)||0)+(c.revenue||0));}
+        else if(baseSet.has(d)){const h=Math.floor(callMin(c)/60);bH.set(h,(bH.get(h)||0)+(c.revenue||0));}}
+      const nb=Math.max(1,baseDays.length);
+      const minFrac=Math.max(0.1,(nowMin%60)/60);
+      let lo=8,hi=Math.max(nowHourSOTU,17);
+      for(const h of tH.keys())if(h<lo&&tH.get(h)>0)lo=h;
+      for(const h of bH.keys()){if(h<lo&&bH.get(h)/nb>25)lo=h;if(h>hi&&bH.get(h)/nb>25)hi=h;}
+      hi=Math.min(hi,21);
+      const cols=[];let mx=1;
+      for(let h=lo;h<=hi;h++){
+        const t=h<=nowHourSOTU?Math.round(tH.get(h)||0):null;
+        const a=Math.round((bH.get(h)||0)/nb*(h===nowHourSOTU?minFrac:1));
+        mx=Math.max(mx,t||0,a);cols.push({h,t,a});}
+
+      // ── buyer shut-off board: who was accepting pings earlier today and
+      // has gone quiet while pings keep flowing (cap-out signature) ──
+      const byBuyer=new Map();
+      for(const r of (pbToday||[])){
+        const k=r.buyer_name||"(unknown buyer)";
+        let o=byBuyer.get(k);if(!o){o={name:k,hours:new Map(),acc:0,pings:0,won:0};byBuyer.set(k,o);}
+        const h=Number(r.hour);let x=o.hours.get(h);if(!x){x={p:0,a:0};o.hours.set(h,x);}
+        x.p+=r.pings||0;x.a+=r.accepted||0;
+        o.acc+=r.accepted||0;o.pings+=r.pings||0;o.won+=r.won_calls||0;}
+      const board=[];let stripLo=nowHourSOTU;
+      for(const o of byBuyer.values()){
+        const hrs=[...o.hours.keys()].sort((x,y)=>x-y);
+        if(hrs.length&&hrs[0]<stripLo)stripLo=hrs[0];
+        const peak=hrs.reduce((s,h)=>Math.max(s,o.hours.get(h).a),0);
+        if(peak<15)continue; // never meaningfully on today; skip noise lanes
+        let lastOn=-1;for(const h of hrs)if(o.hours.get(h).a>0)lastOn=Math.max(lastOn,h);
+        let offFull=false,offCur=0;
+        for(const h of hrs)if(h>lastOn){const x=o.hours.get(h);
+          if(h<nowHourSOTU&&x.p>=30)offFull=true;if(h===nowHourSOTU)offCur=x.p;}
+        const cur=o.hours.get(nowHourSOTU)||{p:0,a:0};
+        const curRate=cur.p?cur.a/cur.p:null;
+        const peakRate=hrs.reduce((s,h)=>{const x=o.hours.get(h);
+          return h<nowHourSOTU&&x.p>=50?Math.max(s,x.a/x.p):s;},0);
+        let chip;
+        if(lastOn>=0&&lastOn<nowHourSOTU&&(offFull||offCur>=100))chip={t:"OFF SINCE "+hLab(lastOn+1),c:C.red};
+        else if(curRate!=null&&cur.p>=100&&peakRate>0&&curRate<peakRate*0.5)chip={t:`FADING ${Math.round(curRate*100)}% (was ${Math.round(peakRate*100)}%)`,c:C.amber};
+        else chip={t:"ON",c:C.green};
+        board.push({...o,peak,chip});}
+      const sev=x=>x.chip.c===C.red?0:x.chip.c===C.amber?1:2;
+      board.sort((x,y)=>sev(x)-sev(y)||y.acc-x.acc);
+      stripLo=Math.max(8,Math.min(stripLo,nowHourSOTU));
+      const stripHours=[];for(let h=stripLo;h<=nowHourSOTU;h++)stripHours.push(h);
+
+      return <div style={{marginBottom:18}}>
+        <div style={{fontSize:12,fontWeight:700,color:C.accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:6}}>Intraday pace — revenue by hour</div>
+        <div style={{...card,marginBottom:14}}>
+          <div style={{display:"flex",alignItems:"flex-end",gap:4,overflowX:"auto",paddingBottom:2}}>
+            {cols.map(cx=>{
+              const beh=cx.t!=null&&cx.a>0?(cx.t-cx.a)/cx.a:null;
+              return <div key={cx.h} style={{flex:1,minWidth:36,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}
+                title={`${hLab(cx.h)} — today ${cx.t!=null?fmt$(cx.t):"(upcoming)"} · avg ${fmt$(cx.a)}${cx.h===nowHourSOTU?" (avg prorated to this point in the hour)":""}`}>
+                <div style={{display:"flex",alignItems:"flex-end",gap:2,height:110,width:"100%",justifyContent:"center"}}>
+                  <div style={{width:"36%",height:Math.max(2,cx.a/mx*110),background:C.border,borderRadius:"3px 3px 0 0"}}/>
+                  {cx.t!=null&&<div style={{width:"36%",height:Math.max(2,cx.t/mx*110),background:beh!=null&&beh<=-0.25?C.red:C.accent,borderRadius:"3px 3px 0 0"}}/>}
+                </div>
+                <div style={{fontSize:10,color:C.dim,whiteSpace:"nowrap"}}>{hLab(cx.h).replace(" ","")}</div>
+                <div style={{fontSize:9,fontWeight:700,height:11,color:beh==null?C.dim:beh<=-0.2?C.red:beh>=0.2?C.green:C.sub}}>{beh!=null?pc100(beh):""}</div>
+              </div>;})}
+          </div>
+          <div style={{fontSize:11,color:C.dim,marginTop:6}}>Gray bars are the hourly average of the last {baseDays.length} {isWkend(today)?"weekend days":"weekdays"}; colored bars are today (red when 25%+ behind). Gray-only bars are what an average {isWkend(today)?"weekend day":"weekday"} brings the rest of the day.</div>
+        </div>
+
+        <div style={{fontSize:12,fontWeight:700,color:C.accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:6}}>Buyer shut-off board — accepted pings by hour, today</div>
+        <div style={card}>
+          {pbToday==null&&<div style={{fontSize:12,color:C.sub,padding:6}}>Loading ping data…</div>}
+          {pbToday!=null&&board.length===0&&<div style={{fontSize:12,color:C.sub,padding:6}}>No hourly ping data for today yet. This board fills in as the ping sync runs through the day.</div>}
+          {board.map((o,i)=><div key={o.name} style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",padding:"7px 4px",borderBottom:i<board.length-1?`1px solid ${C.border}`:"none"}}>
+            <span style={{fontWeight:700,fontSize:13,color:C.text,minWidth:170}}>{o.name}</span>
+            <span style={{display:"flex",gap:2,alignItems:"flex-end"}}>
+              {stripHours.map(h=>{const x=o.hours.get(h);
+                const bg=!x||x.p===0?"transparent":x.a>0?C.green:C.red;
+                const op=!x||x.p===0?1:x.a>0?Math.max(0.3,x.a/o.peak):0.45;
+                return <span key={h} title={`${hLab(h)} — ${x?x.a.toLocaleString():0} accepted / ${x?x.p.toLocaleString():0} pings`}
+                  style={{width:13,height:13,borderRadius:3,border:`1px solid ${C.border}`,background:bg,opacity:op}}/>;})}
+            </span>
+            <span style={{...mono,fontSize:12,color:C.sub}}>{o.acc.toLocaleString()} accepted · {o.won.toLocaleString()} calls won</span>
+            <span style={{fontSize:10,fontWeight:700,color:o.chip.c,border:`1px solid ${o.chip.c}`,borderRadius:4,padding:"1px 6px",whiteSpace:"nowrap"}}>{o.chip.t}</span>
+          </div>)}
+          {board.length>0&&<div style={{fontSize:11,color:C.dim,marginTop:8}}>Each square is an hour ({hLab(stripLo)} → now). Green = accepting (darker = more accepted), red = pings flowing but nothing accepted, empty = no pings. OFF SINCE flags a buyer that was accepting earlier and has stopped while pings continue — the daily-cap signature.</div>}
+        </div>
+      </div>;})()}
     <Bucket title="Needs attention" color={C.red} bEntities={bb.issues} pEntities={pp.issues}/>
     <Bucket title="Performing" color={C.green} bEntities={bb.wins} pEntities={pp.wins}/>
     <div style={{marginTop:6}}>
@@ -11591,20 +13118,116 @@ function StateOfUnion({data}){
         <Bucket title="Running steady" color={C.sub} bEntities={bb.steady} pEntities={pp.steady}/>
       </div>}
     </div>
-    {launches.length>0&&<div style={{marginTop:22}}>
-      <div style={{fontSize:12,fontWeight:700,color:C.accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:6}}>Campaign launches — last 21 days and upcoming</div>
-      <div style={card}>
-        {launches.map((l,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",padding:"8px 4px",borderBottom:`1px solid ${C.border}`}}>
-          <span style={{fontSize:10,fontWeight:700,color:l.side==="Buyer"?C.accent:C.amber,border:`1px solid ${C.border}`,borderRadius:4,padding:"1px 6px"}}>{l.side.toUpperCase()}</span>
-          <span style={{fontWeight:700,fontSize:13,color:C.text}}>{l.parent}</span>
-          <span style={{fontSize:12,color:C.sub}}>{l.name}</span>
-          <span style={{fontSize:11,color:C.dim}}>{l.created?`created ${fmtShort(l.created)} · `:""}launch {fmtShort(l.launch)}{l.first?` · first call ${fmtShort(l.first.d)} ${etTime(l.first.dt)}`:""}</span>
-          {l.n>0&&<span style={{...mono,fontSize:12,color:C.text}}>· {l.n} calls / {l.bill} bill / {fmt$(l.rev)}</span>}
-          {l.chips.map((x,j)=><span key={j} style={{fontSize:10,fontWeight:700,color:x.c,border:`1px solid ${x.c}`,borderRadius:4,padding:"1px 6px",whiteSpace:"nowrap"}}>{x.t}</span>)}
-        </div>)}
-        <div style={{fontSize:11,color:C.dim,marginTop:8}}>A launch-day campaign with zero calls turns red at noon ET, and the alert engine emails it (Configuration → Notifications). Setup chips flag missing rate, target, or CallGrid link before launch day.</div>
+    <div style={{marginTop:22}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:6}}>
+        <div style={{fontSize:12,fontWeight:700,color:C.accent,textTransform:"uppercase",letterSpacing:"0.08em"}}>Campaign launches{/^\d{4}-\d{2}$/.test(launchMonth)?"":" — last 30 days, plus older launches still at zero calls"}</div>
+        <select value={launchMonth} onChange={e=>setLaunchMonth(e.target.value)} style={{background:"transparent",border:`1px solid ${C.border}`,borderRadius:6,color:C.sub,fontSize:11,fontWeight:700,padding:"4px 8px",cursor:"pointer"}}>
+          <option value="recent">Last 30 days + no-call stragglers</option>
+          {Array.from({length:4},(_,i)=>{const d=new Date();d.setDate(1);d.setMonth(d.getMonth()-i);const ym=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;return <option key={ym} value={ym}>{d.toLocaleString("en-US",{month:"long",year:"numeric"})} only</option>;})}
+        </select>
+        <input value={launchQ} onChange={e=>setLaunchQ(e.target.value)} placeholder="Search buyer / pub / campaign…"
+          style={{background:"transparent",border:`1px solid ${launchQ?C.accent:C.border}`,borderRadius:6,color:C.text,fontSize:11.5,padding:"4px 10px",width:190,outline:"none"}}/>
+        <div style={{display:"flex",border:`1px solid ${C.border}`,borderRadius:6,overflow:"hidden"}}>
+          {[["all","All"],["Buyer","Buyers"],["Publisher","Pubs"]].map(([id,l])=>
+            <button key={id} onClick={()=>setLaunchSide(id)} style={{background:launchSide===id?C.accent:"transparent",color:launchSide===id?C.accentFg:C.sub,border:"none",padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer"}}>{l}</button>)}
+        </div>
+        <div style={{display:"flex",border:`1px solid ${C.border}`,borderRadius:6,overflow:"hidden"}}>
+          {[["status","By status"],["launch","By launch date"],["created","By created"]].map(([id,l])=>
+            <button key={id} onClick={()=>setLaunchSort(id)} style={{background:launchSort===id?`${C.accent}26`:"transparent",color:launchSort===id?C.accent:C.sub,border:"none",padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer"}}>{l}</button>)}
+        </div>
+        <div style={{display:"flex",border:`1px solid ${C.border}`,borderRadius:6,overflow:"hidden"}}>
+          {[["all","Show all"],["nocalls","🚩 No calls only"]].map(([id,l])=>
+            <button key={id} onClick={()=>setLaunchOnly(launchOnly===id?"all":id)} style={{background:launchOnly===id?(id==="nocalls"?C.red:C.accent):"transparent",color:launchOnly===id?C.accentFg:C.sub,border:"none",padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer"}}>{l}</button>)}
+        </div>
+        <label style={{display:"flex",gap:6,alignItems:"center",fontSize:11,color:C.sub,cursor:"pointer"}}>
+          <input type="checkbox" checked={launchInactive} onChange={e=>setLaunchInactive(e.target.checked)}/>Include inactive
+        </label>
+        <span style={{fontSize:11,color:C.dim}}>
+          {launchView.length} shown · {launchSide==="all"?"buyers + pubs":launchSide==="Buyer"?"buyers only":"pubs only"}{/^\d{4}-\d{2}$/.test(launchMonth)?` · launched in ${launchMonth}`:""}{launchOnly!=="all"?` · ${launchOnly==="nocalls"?"no calls only":"setup gaps only"}`:""}{lq?` · matching "${launchQ.trim()}"`:""} · sorted {launchSort==="status"?"worst status first":launchSort==="launch"?"newest launch first":"newest created first"}
+        </span>
       </div>
-    </div>}
+      <div style={card}>
+        {launchView.length===0&&<div style={{fontSize:12,color:C.sub,textAlign:"center",padding:16}}>No {launchSide==="all"?"":launchSide.toLowerCase()+" "}launches in the window{launchInactive?"":" (inactive campaigns are hidden — tick \"Include inactive\" to see them)"}.</div>}
+        {launchView.length>0&&<div style={{overflowX:"auto"}}>
+        <table style={{borderCollapse:"collapse",width:"100%",minWidth:1150}}>
+          <thead><tr>{["","Side","Destination / Source","Campaign","CG start","Launch","Status","First call","Calls","Bill","Revenue","Flags"].map((h,i)=><th key={i} style={{padding:"6px 8px",borderBottom:`2px solid ${C.border}`,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",color:C.sub,textAlign:i>=8&&i<=10?"right":"left",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+          <tbody>
+          {launchView.map(l=>{const lnote=launchNotes[l.key]||null;const noCalls=l.n===0&&l.launch<=today&&!l.inactive;const flagRed=noCalls&&!lnote;const tdL={padding:"7px 8px",borderBottom:`1px solid ${C.border}`,fontSize:12,color:C.text,verticalAlign:"top"};return <React.Fragment key={l.key}>
+          <tr onClick={()=>setOpenLaunch(openLaunch===l.key?null:l.key)} style={{cursor:"pointer",opacity:l.inactive?0.7:1,background:openLaunch===l.key?"rgba(255,255,255,0.03)":flagRed?"rgba(255,80,80,0.05)":"transparent",boxShadow:flagRed?`inset 3px 0 0 ${C.red}`:noCalls?`inset 3px 0 0 ${C.amber}`:"none"}}>
+            <td style={tdL}><span style={{color:C.accent,fontSize:11}}>{openLaunch===l.key?"▾":"▸"}</span></td>
+            <td style={tdL}><span style={{fontSize:10,fontWeight:700,color:l.side==="Buyer"?C.accent:C.amber}}>{l.side==="Buyer"?"BUYER":"PUB"}</span></td>
+            <td style={{...tdL,fontWeight:700,maxWidth:250,overflowWrap:"anywhere"}}>{l.dest||<span style={{color:C.dim,fontWeight:400}}>— not linked</span>}</td>
+            <td style={{...tdL,maxWidth:210}}>{l.name}<div style={{fontSize:10,color:C.dim}}>{l.parent}</div></td>
+            <td style={{...tdL,...mono,fontSize:11,whiteSpace:"nowrap",color:l.cgStart?C.text:C.dim}}>{l.cgStart?fmtShort(l.cgStart):"—"}</td>
+            <td style={{...tdL,...mono,fontSize:11,whiteSpace:"nowrap"}} title={l.dashStart?`Dashboard row says ${l.dashStart}, but calls started ${l.launch} — using the real date`:undefined}>{dowLetter(l.launch)} {fmtShort(l.launch)}{l.dashStart?<span style={{color:C.amber}}> *</span>:null}</td>
+            <td style={tdL}>{l.inactive?<span style={{color:C.dim,fontSize:10.5,fontWeight:700}}>INACTIVE</span>
+              :l.cgStatus==="live"?<span style={{color:C.green,fontSize:10.5,fontWeight:700}}>● LIVE</span>
+              :l.cgStatus==="paused"?<span style={{color:C.amber,fontSize:10.5,fontWeight:700}}>❚❚ PAUSED</span>
+              :<span style={{color:C.dim,fontSize:10.5}} title="CallGrid status unknown — no settings-sync match yet">—</span>}</td>
+            <td style={{...tdL,fontSize:11,whiteSpace:"nowrap",color:l.first?C.text:l.launch>today?C.dim:C.red,fontWeight:l.first||l.launch>today?400:700}}>{l.first?`${dowLetter(l.first.d)} ${fmtShort(l.first.d)} ${etTime(l.first.dt)}`:l.launch>today?"upcoming":"none yet"}</td>
+            <td style={{...tdL,...mono,textAlign:"right"}}>{l.n?l.n.toLocaleString():"0"}</td>
+            <td style={{...tdL,...mono,textAlign:"right"}}>{l.bill?l.bill.toLocaleString():"0"}</td>
+            <td style={{...tdL,...mono,textAlign:"right",color:l.rev>0?C.green:C.dim}}>{fmt$(l.rev)}</td>
+            <td style={{...tdL,maxWidth:220}}>
+              {lnote&&<span title={`${lnote.note} — ${lnote.noted_by||"?"}`} style={{display:"inline-block",fontSize:9.5,fontWeight:700,color:C.amber,border:`1px solid ${C.amber}`,borderRadius:4,padding:"1px 5px",margin:"1px 4px 1px 0",whiteSpace:"nowrap"}}>📝 EXPLAINED</span>}
+              {l.chips.map((x,j)=><span key={j} style={{display:"inline-block",fontSize:9.5,fontWeight:700,color:lnote&&x.c===C.red?C.amber:x.c,border:`1px solid ${lnote&&x.c===C.red?C.amber:x.c}`,borderRadius:4,padding:"1px 5px",margin:"1px 4px 1px 0",whiteSpace:"nowrap"}}>{x.t}</span>)}
+              {lnote&&<div style={{fontSize:10.5,color:C.sub,marginTop:2,maxWidth:220}}>{String(lnote.note).slice(0,90)}{String(lnote.note).length>90?"…":""}</div>}
+            </td>
+          </tr>
+          {openLaunch===l.key&&<tr><td colSpan={12} style={{padding:0,borderBottom:`1px solid ${C.border}`}}>
+            <div style={{padding:"12px 18px 16px 34px",background:"rgba(255,255,255,0.02)"}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(170px,1fr))",gap:"8px 20px",marginBottom:12}}>
+              {[[l.side==="Buyer"?"Rate (we bill)":"Rate (we pay)",l.rate!=null?fmt$(l.rate):"— not set"],
+                ["Daily call target",l.target?l.target.toLocaleString():"— not set"],
+                ["Vertical",l.vertical||"—"],["Lead type",l.lead||"—"],
+                ["Duration",l.dur?`${l.dur}s`:"—"],
+                ["Billing",l.freq?`${l.freq}${l.net!=null?` · net ${l.net}`:""}`:"—"],
+                ["CallGrid link",l.cg||"— not linked"],
+                ["Created in dashboard",l.created?fmtShort(l.created):"—"],
+                ...(l.dashStart?[["Dashboard start date",`${fmtShort(l.dashStart)} (corrected to first call)`]]:[]),
+                ["Since launch",`${l.n.toLocaleString()} calls · ${l.bill.toLocaleString()} billable · ${fmt$(l.rev)}`],
+              ].map(([k,v])=><div key={k}>
+                <div style={{fontSize:10,fontWeight:700,color:C.sub,textTransform:"uppercase",letterSpacing:"0.06em"}}>{k}</div>
+                <div style={{fontSize:12.5,color:String(v).startsWith("—")?C.dim:C.text,marginTop:2,overflowWrap:"anywhere"}}>{v}</div>
+              </div>)}
+            </div>
+            <div style={{marginBottom:12}}>
+              <div style={{fontSize:10,fontWeight:700,color:C.sub,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>Flag note{launchNotes[l.key]?` — ${launchNotes[l.key].noted_by||"?"} · ${String(launchNotes[l.key].noted_at||"").slice(0,10)}`:""}</div>
+              {noteDraft&&noteDraft.key===l.key
+                ?<div style={{display:"flex",gap:8,alignItems:"flex-start",flexWrap:"wrap"}}>
+                  <textarea autoFocus value={noteDraft.note} onChange={e=>setNoteDraft({key:l.key,note:e.target.value})} rows={2} placeholder="Why is this flag expected? (e.g. buyer pushed launch to Monday, waiting on DID port, test campaign)" style={{...inputStyle,width:420,maxWidth:"90%",fontSize:12,resize:"vertical"}}/>
+                  <Btn onClick={()=>saveLaunchNote(l.key,noteDraft.note)} disabled={noteBusy} style={{fontSize:12,padding:"6px 14px"}}>{noteBusy?"Saving…":"Save note"}</Btn>
+                  <Btn outline color={C.sub} onClick={()=>setNoteDraft(null)} style={{fontSize:12,padding:"6px 14px"}}>Cancel</Btn>
+                </div>
+                :launchNotes[l.key]
+                ?<div style={{display:"flex",gap:10,alignItems:"baseline",flexWrap:"wrap"}}>
+                  <span style={{fontSize:12.5,color:C.text}}>{launchNotes[l.key].note}</span>
+                  <button onClick={()=>setNoteDraft({key:l.key,note:launchNotes[l.key].note||""})} style={{background:"none",border:"none",color:C.accent,cursor:"pointer",fontSize:11}}>✎ edit</button>
+                  <button onClick={()=>{if(confirm("Remove the note? The flag goes back to red and the alert engine resumes alerting on it."))saveLaunchNote(l.key,"");}} style={{background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:11}}>remove</button>
+                </div>
+                :<div style={{display:"flex",gap:10,alignItems:"baseline"}}>
+                  <span style={{fontSize:12,color:C.dim}}>No note. If you looked into this flag and there is a valid reason, record it here: the row softens to amber and the alert engine stops re-alerting on it.</span>
+                  <Btn outline onClick={()=>setNoteDraft({key:l.key,note:""})} style={{fontSize:11,padding:"4px 12px"}}>+ Add note</Btn>
+                </div>}
+            </div>
+            {l.daily.length>0?<div>
+              <div style={{fontSize:10,fontWeight:700,color:C.sub,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>Last 14 days</div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                {l.daily.map(d=><div key={d.d} style={{border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 9px",background:isMondayD(d.d)?mondayRowStyle.background:"transparent"}}>
+                  <div style={{fontSize:10,color:C.dim}}>{dowLetter(d.d)} {fmtShort(d.d)}</div>
+                  <div style={{...mono,fontSize:11.5,color:C.text}}>{d.n} / {d.bill}b · {fmt$(d.rev)}</div>
+                </div>)}
+              </div>
+            </div>:<div style={{fontSize:12,color:C.dim}}>No calls in the last 14 days.</div>}
+            </div>
+          </td></tr>}
+          </React.Fragment>;})}
+          </tbody>
+        </table>
+        </div>}
+        <div style={{fontSize:11,color:C.dim,marginTop:8}}>A launch-day campaign with zero calls turns red at noon ET and the alert engine emails it; the flag clears on its own as soon as calls arrive, and the open alert auto-resolves on the next engine run. Launches older than 30 days drop off this list the moment they take their first call. CG start and Live/Paused come from CallGrid via the hourly settings sync; a dash means CallGrid has no campaign matching that name.</div>
+      </div>
+    </div>
     {(bb.issues.concat(pp.issues).some(e=>e.target==null))&&<div style={{fontSize:11,color:C.dim,marginTop:14}}>Entities without a target show no attainment chip. Set Daily Call Target on each campaign in Configuration to light those up.</div>}
   </div>;
 }
@@ -11815,10 +13438,14 @@ function Dashboard({data}) {
     ovNote=`This hour (${hourLab(nowHour)}) so far, vs the average of today's previous hours. Chart shows today hour by hour`;
   }else if(ovPeriod==="daily"){
     ovCur=periodToDate(today,0,nowHour);
-    const prevs=[];for(let k=1;k<=7;k++)prevs.push(periodToDate(dAgo(k),0,nowHour));
+    // compare like with like: weekdays against the previous 7 weekdays,
+    // weekend days against the previous 7 weekend days
+    const wkndD=ds=>{const w=parseLocalDate(ds).getDay();return w===0||w===6;};
+    const tw=wkndD(today);
+    const prevs=[];for(let k=1;k<=35&&prevs.length<7;k++){const d=dAgo(k);if(wkndD(d)===tw)prevs.push(periodToDate(d,0,nowHour));}
     ovPrev=avgOf(prevs);
     ovB=bucketsFromHours();
-    ovNote=`Today so far, broken out by hour, vs the average of the previous 7 days through ${hourLab(nowHour)}`;
+    ovNote=`Today so far, broken out by hour, vs the average of the previous ${prevs.length} ${tw?"weekend days":"weekdays"} through ${hourLab(nowHour)}`;
   }else if(ovPeriod==="weekly"){
     const elapsed=(dowT+6)%7;
     ovCur=periodToDate(mon0,elapsed,nowHour);
@@ -12019,8 +13646,825 @@ function Dashboard({data}) {
 // Reads the local hubspot_companies mirror (populated by hubspot-sync on a
 // schedule and on demand). HubSpot owns this data; this tab is the fast, searchable window into it,
 // with each account's dashboard linkage, campaigns, and notes alongside.
+// Read-only grid: what the signed IO says vs what CallGrid is actually
+// running — discrepancies highlighted. Used by CRM; Onboarding has its own
+// editable variant.
+// ── Spec section 8 display semantics for CallGrid-side operational values.
+// Open: campaign is CallGrid-matched and the field is unset = CallGrid
+// confirms no limit. N/A: inapplicable to the campaign type (DID for RTB,
+// duration for CPA). Unknown: no CallGrid match, nothing verified. A 25,000s
+// duration is CallGrid's CPA placeholder, never a real billable duration.
+// Display only — nothing here writes to HubSpot or CallGrid, and IO_* contractual
+// values stay separate; a disagreement is shown without overwriting either.
+function obLivePairs(c){
+  const digits=x=>String(x||"").replace(/\D/g,"");
+  const low=x=>String(x??"").trim().toLowerCase();
+  const hay=`${c.traffic_type||""} ${c.lead_type||""} ${c.name||""} ${c.callgrid_campaign||""}`;
+  const isRTB=/rtb/i.test(hay),isCPA=/cpa/i.test(hay);
+  const matched=!!(c.callgrid_campaign||c.campaign_link_status==="Linked");
+  const D=(t,mode)=>({t,mode});
+  const lv=(v,kind)=>{
+    if(kind==="did"&&isRTB)return D("N/A — RTB","na");
+    if(kind==="duration"&&isCPA)return D("N/A — CPA","na");
+    if(kind==="duration"&&v!=null&&Number(v)>=25000)return D("25,000s placeholder — not a real duration","ph");
+    if(v!=null&&v!=="")return D(kind==="rate"?`$${v}`:kind==="duration"?`${v}s`:String(v),"val");
+    if(["cap","conc","hours"].includes(kind))return matched?D("Open — no limit set","open"):D("Unknown","unk");
+    return matched?D("—","unk"):D("Unknown","unk");
+  };
+  const mk=(label,io,live,bad)=>({label,io,live,bad:!!bad&&live.mode==="val"});
+  return [
+    mk("Rate",c.io_rate!=null?`$${c.io_rate}`:null,lv(c.rate,"rate"),c.io_rate!=null&&c.rate!=null&&Number(c.io_rate)!==Number(c.rate)),
+    mk("Duration",c.io_duration!=null?`${c.io_duration}s`:null,lv(c.billable_duration,"duration"),c.io_duration!=null&&c.billable_duration!=null&&Number(c.billable_duration)<25000&&Number(c.io_duration)!==Number(c.billable_duration)),
+    mk("DID",c.io_did,lv(c.did,"did"),!!(c.io_did&&c.did&&digits(c.io_did)!==digits(c.did)&&!digits(c.did).includes(digits(c.io_did)))),
+    mk("Daily cap",c.io_daily_cap,lv(c.daily_cap,"cap"),c.io_daily_cap!=null&&c.daily_cap!=null&&Number(c.io_daily_cap)!==Number(c.daily_cap)),
+    mk("Concurrency",c.io_concurrency,lv(c.concurrency,"conc"),c.io_concurrency!=null&&c.concurrency!=null&&Number(c.io_concurrency)!==Number(c.concurrency)),
+    mk("Call hours",c.io_call_hours,lv(c.call_hours,"hours"),!!(c.io_call_hours&&c.call_hours&&low(c.io_call_hours)!==low(c.call_hours))),
+    mk("Payment terms",c.io_payment_terms,lv(c.payment_terms||c.synced_payment_terms,"terms"),!!(c.io_payment_terms&&(c.payment_terms||c.synced_payment_terms)&&low(c.io_payment_terms)!==low(c.payment_terms||c.synced_payment_terms))),
+  ];
+}
+const obLiveColor=m=>m==="open"?C.green:m==="ph"?C.amber:m==="val"?C.text:C.dim;
+function IoCompareGrid({c}){
+  const pairs=obLivePairs(c);
+  const mism=pairs.filter(p=>p.bad).length;
+  const td={padding:"5px 10px",borderBottom:`1px solid ${C.border}`,fontSize:12};
+  const th={padding:"4px 10px",borderBottom:`2px solid ${C.border}`,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",color:C.sub,textAlign:"left"};
+  return <div>
+    <div style={{fontSize:10,fontWeight:700,color:mism?C.amber:C.sub,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>
+      IO terms vs live CallGrid settings{mism?` — ${mism} discrepanc${mism===1?"y":"ies"}`:" — in agreement"}
+    </div>
+    <table style={{borderCollapse:"collapse"}}>
+      <thead><tr><th style={th}></th><th style={th}>Contract (IO)</th><th style={th}>Live (CallGrid)</th></tr></thead>
+      <tbody>{pairs.map(p=><tr key={p.label}>
+        <td style={{...td,color:C.sub,fontSize:11}}>{p.label}</td>
+        <td style={{...td,color:p.io==null?C.dim:C.text,background:p.bad?"rgba(255,180,60,0.12)":"transparent"}}>{p.io==null?"—":String(p.io)}</td>
+        <td style={{...td,color:obLiveColor(p.live.mode),background:p.bad?"rgba(255,180,60,0.12)":"transparent"}}>{p.live.t}</td>
+      </tr>)}</tbody>
+    </table>
+    <div style={{fontSize:9.5,color:C.dim,marginTop:4}}>Open = CallGrid confirms no limit set · N/A = inapplicable to this campaign type · Unknown = not CallGrid-verified. Display only, nothing is written back.</div>
+  </div>;
+}
+// ── Per-user notification preferences (Decision 8). Each signed-in user
+// subscribes their own verified dashboard email; rows live in
+// notification_prefs (RLS: everyone reads, you write only your own).
+// Alerts are deduped per event in the outbox; preferences apply prospectively.
+function NotificationPrefsModal({email,onClose}){
+  const KINDS=[
+    ["new_campaigns","New Buyer Offers and Publisher Campaigns","one email per genuinely new campaign (introductions)"],
+    ["missing_terms","Missing or unverified payment terms","campaigns created or introduced without verified contractual terms"],
+    ["missing_docs","Missing signed MSA or IO","a campaign went live without an executed document on file"],
+    ["verified_golive","Verified campaign go-live","a campaign was verified live and its onboarding completed"],
+    ["unmatched","Unmatched campaigns / Supply & Demand","campaigns approaching launch without a confirmed match"],
+  ];
+  const [rows,setRows]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const load=React.useCallback(async()=>{
+    try{setRows(await sb("GET",`notification_prefs?email=ilike.${encodeURIComponent(email)}&select=kind,enabled`));}
+    catch(_e){setRows(false);}
+  },[email]);
+  useEffect(()=>{load();},[load]);
+  const on=k=>Array.isArray(rows)&&rows.some(r=>r.kind===k&&r.enabled);
+  async function toggle(k){
+    if(busy||rows===null)return;
+    setBusy(true);
+    try{
+      const want=!on(k);
+      await sb("DELETE",`notification_prefs?email=ilike.${encodeURIComponent(email)}&kind=eq.${k}`);
+      if(want)await sb("POST","notification_prefs",{email,kind:k,enabled:true});
+      await load();
+    }catch(e){alert(`Could not save: ${e?.message||e}`);}
+    setBusy(false);
+  }
+  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onClose}>
+    <div style={{...card,width:470,maxWidth:"94vw",maxHeight:"85vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+        <div style={{fontSize:15,fontWeight:700}}>Notification preferences</div>
+        <button onClick={onClose} style={{background:"none",border:"none",color:C.sub,cursor:"pointer",fontSize:16}}>✕</button>
+      </div>
+      <div style={{fontSize:11,color:C.dim,margin:"4px 0 12px"}}>Email alerts go to {email}. Changes apply to future alerts only; each event is sent once per recipient.</div>
+      {rows===false&&<div style={{fontSize:12,color:C.red}}>Preferences table not found — run the notification prefs migration.</div>}
+      {rows===null&&<div style={{fontSize:12,color:C.sub}}>Loading…</div>}
+      {Array.isArray(rows)&&KINDS.map(([k,label,desc])=><label key={k} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"9px 0",borderBottom:`1px solid ${C.border}`,cursor:busy?"wait":"pointer"}}>
+        <input type="checkbox" checked={on(k)} disabled={busy} onChange={()=>toggle(k)} style={{marginTop:2}}/>
+        <span><span style={{fontSize:12.5,fontWeight:700,color:C.text}}>{label}</span>
+        <div style={{fontSize:10.5,color:C.sub}}>{desc}</div></span>
+      </label>)}
+      <div style={{fontSize:10,color:C.dim,marginTop:10}}>Critical missing-contract alerts always reach at least one designated recipient even if nobody is subscribed.</div>
+    </div>
+  </div>;
+}
+// ── Supply & Demand + campaign match suggestions (Decision 9).
+// Suggestions are computed read-only from campaign compatibility (vertical,
+// type tokens, rates vs the 15% floor, durations). They are never matches:
+// confirmed relationships live in HubSpot (Campaign Matches) and arrive here
+// only through the mirror. Unknown volume or rates are flagged, not invented.
+function SupplyDemand({camps,matches,me,reload}){
+  const [busy,setBusy]=useState(false);
+  const vertOf=c=>{
+    if(c.vertical)return c.vertical;
+    const n=String(c.name||"").toLowerCase();
+    if(/final expense|\bfe\b|\bvfe\b/.test(n))return "Final Expense";
+    if(/medicare|\bma\b/.test(n))return "Medicare";
+    if(/\baca\b|u65/.test(n))return "ACA";
+    if(/ssdi|disab/.test(n))return "SSDI";
+    if(/auto/.test(n))return "Auto";
+    if(/home/.test(n))return "Home";
+    if(/term/.test(n))return "Term Life";
+    return "Other";
+  };
+  const buyers=camps.filter(c=>c.side==="buyer");
+  const pubs=camps.filter(c=>c.side==="publisher");
+  const act=matches.filter(m=>!["Rejected","Inactive"].includes(m.match_stage||""));
+  const actPairs=new Set(act.map(m=>`${m.buyer_campaign_crm_id}|${m.publisher_campaign_crm_id}`));
+  const decided=new Set(matches.map(m=>`${m.buyer_campaign_crm_id}|${m.publisher_campaign_crm_id}`));
+  const matchedBuy=new Set(act.map(m=>m.buyer_campaign_crm_id));
+  const matchedPub=new Set(act.map(m=>m.publisher_campaign_crm_id));
+  const campById=new Map(camps.map(c=>[c.crm_id,c]));
+  const TYPE=["rtb","ctv","inbound","inb","transfer","linear","social","spanish","raw","static"];
+  const typeTok=c=>{const s2=`${c.lead_type||""} ${c.traffic_type||""} ${c.name||""}`.toLowerCase();return new Set(TYPE.filter(t=>s2.includes(t)));};
+  const rateOf=c=>{const v=Number(c.io_rate??c.rate);return isFinite(v)&&v>0?v:null;};
+  const suggestions=React.useMemo(()=>{
+    const out=[];
+    for(const b of buyers){
+      const bv=vertOf(b);if(bv==="Other")continue; // no signal, no guess
+      const bt=typeTok(b);const br=rateOf(b);
+      for(const p of pubs){
+        if(vertOf(p)!==bv)continue;
+        const key=`${b.crm_id}|${p.crm_id}`;
+        if(decided.has(key))continue;
+        const pt=typeTok(p);let shared=0;for(const t of pt)if(bt.has(t))shared++;
+        if(bt.size&&pt.size&&shared===0)continue;
+        const pr=rateOf(p);
+        const margin=br&&pr?(br-pr)/br:null;
+        if(margin!=null&&margin<0.15)continue;
+        const flags=[];
+        if(br==null)flags.push("buyer rate unknown");
+        if(pr==null)flags.push("pub payout unknown");
+        const bd=Number(b.billable_duration)||null,pd=Number(p.billable_duration)||null;
+        if(bd&&pd&&pd>bd&&pd<25000)flags.push(`pub billable ${pd}s exceeds buyer ${bd}s`);
+        out.push({b,p,br,pr,margin,flags,score:shared*2+(margin!=null?(margin>=0.2?2:1):0)});
+      }
+    }
+    return out.sort((x,y)=>y.score-x.score).slice(0,60);
+  },[camps,matches]);
+  async function cmWrite(body){
+    setBusy(true);
+    try{
+      const session=sessionStorage.getItem("nyala_session");
+      const tok=session?JSON.parse(session).access_token:null;
+      const r=await fetch(`${SUPABASE_URL}/functions/v1/onboarding-write`,{method:"POST",headers:{"Content-Type":"application/json",apikey:SUPABASE_ANON_KEY,Authorization:`Bearer ${tok}`},body:JSON.stringify({cm:body})});
+      const j=await r.json();
+      if(!r.ok||!j.saved)throw new Error(j.error||`HTTP ${r.status}`);
+      await reload();
+    }catch(e){alert(String(e?.message||e));}
+    setBusy(false);
+  }
+  const f2=n=>n==null?"—":`$${Number(n).toFixed(2)}`;
+  const fmtM=m=>m==null?"rate unknown":`${(m*100).toFixed(1)}%`;
+  const mCol=m=>m==null?C.dim:m>=0.2?C.green:m>=0.15?C.amber:C.red;
+  const STG={Proposed:C.sub,"Under Review":C.amber,Confirmed:C.green,"Ready for Launch":C.teal,Live:C.green,Inactive:C.dim,Rejected:C.red};
+  const chipS=(t,col)=><span style={{fontSize:10,fontWeight:700,color:col||C.sub,border:`1px solid ${col||C.border}`,borderRadius:4,padding:"1px 6px",whiteSpace:"nowrap"}}>{t}</span>;
+  const thD={padding:"6px 8px",borderBottom:`2px solid ${C.border}`,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",color:C.sub,textAlign:"left"};
+  const tdD={padding:"7px 8px",borderBottom:`1px solid ${C.border}`,fontSize:12,verticalAlign:"top"};
+  const campCell=c=>c?<span><b>{c.account_name||"?"}</b><div style={{fontSize:10,color:C.dim}}>{c.name}</div></span>:<span style={{color:C.dim}}>?</span>;
+  const btn=(label,col,fn,title)=><button disabled={busy} title={title} onClick={fn} style={{background:"none",border:`1px solid ${col}`,borderRadius:4,color:col,cursor:"pointer",fontSize:10.5,padding:"2px 9px",marginRight:5}}>{label}</button>;
+  const demandNo=buyers.filter(b=>!matchedBuy.has(b.crm_id)&&b.offer_status!=="Complete");
+  const supplyNo=pubs.filter(p=>!matchedPub.has(p.crm_id)&&p.offer_status!=="Complete");
+  return <div>
+    <div style={{fontSize:12,color:C.sub,marginBottom:12}}>Suggestions are compatibility hints (vertical, type, rates against the 15% floor, durations), never matches. Confirming writes the relationship to HubSpot Campaign Matches, attributed and logged; an unmatched campaign can keep onboarding but is flagged before Ready for Launch.</div>
+    <div style={{display:"flex",gap:12,marginBottom:14,flexWrap:"wrap"}}>
+      {[["ACTIVE MATCHES",act.length,C.green],["SUGGESTIONS",suggestions.length,C.teal],["DEMAND WITHOUT SUPPLY",demandNo.length,demandNo.length?C.amber:C.green],["SUPPLY WITHOUT DEMAND",supplyNo.length,supplyNo.length?C.amber:C.green]].map(([l,v,c2])=>
+        <div key={l} style={{...card,flex:1,minWidth:150}}><div style={{fontSize:11,color:C.sub}}>{l}</div><div style={{fontSize:22,fontWeight:800,color:c2,marginTop:6}}>{v}</div></div>)}
+    </div>
+
+    <div style={{...card,overflowX:"auto",marginBottom:16}}>
+      <div style={{fontSize:12,fontWeight:800,marginBottom:8}}>Matches (HubSpot is the record)</div>
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:900}}>
+        <thead><tr>{["Buyer","Publisher","Stage","Owner","Confirmed","Notes",""].map(h=><th key={h} style={thD}>{h}</th>)}</tr></thead>
+        <tbody>
+        {matches.length===0&&<tr><td style={{...tdD,color:C.dim}} colSpan={7}>No match records yet.</td></tr>}
+        {matches.map(m=><tr key={m.crm_id} style={["Rejected","Inactive"].includes(m.match_stage)?{opacity:0.55}:undefined}>
+          <td style={tdD}>{campCell(campById.get(m.buyer_campaign_crm_id))}</td>
+          <td style={tdD}>{campCell(campById.get(m.publisher_campaign_crm_id))}</td>
+          <td style={tdD}>
+            <select disabled={busy} value={m.match_stage||"Proposed"} onChange={e=>{
+              const st=e.target.value;
+              if(st==="Rejected"){const reason=prompt("Rejection reason (required):");if(!reason)return;cmWrite({action:"stage",match_crm_id:m.crm_id,stage:st,reason});return;}
+              cmWrite({action:"stage",match_crm_id:m.crm_id,stage:st});
+            }} style={{background:C.bg,border:`1px solid ${STG[m.match_stage]||C.border}`,borderRadius:5,color:STG[m.match_stage]||C.text,padding:"3px 6px",fontSize:11,fontWeight:700}}>
+              {Object.keys(STG).map(s2=><option key={s2}>{s2}</option>)}
+            </select>
+          </td>
+          <td style={{...tdD,fontSize:11}}>{m.match_owner||"—"}</td>
+          <td style={{...tdD,fontSize:11,color:C.sub}}>{m.confirmed_by?`${m.confirmed_by} ${String(m.confirmed_on||"").slice(0,10)}`:"—"}</td>
+          <td style={{...tdD,fontSize:11,color:C.sub,maxWidth:200}}>{m.rejection_reason||m.match_notes||"—"}</td>
+          <td style={tdD}>{chipS(m.match_source||"—")}</td>
+        </tr>)}
+        </tbody>
+      </table>
+    </div>
+
+    <div style={{...card,overflowX:"auto",marginBottom:16}}>
+      <div style={{fontSize:12,fontWeight:800,marginBottom:8}}>Suggested matches <span style={{fontSize:10,color:C.dim,fontWeight:400}}>(compatibility only — confirming is a human decision, logged)</span></div>
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:950}}>
+        <thead><tr>{["Buyer (RPC)","Publisher (CPC)","Margin at rates","Watch-outs",""].map(h=><th key={h} style={thD}>{h}</th>)}</tr></thead>
+        <tbody>
+        {suggestions.length===0&&<tr><td style={{...tdD,color:C.dim}} colSpan={5}>No compatible unmatched pairs found.</td></tr>}
+        {suggestions.map(s2=><tr key={`${s2.b.crm_id}|${s2.p.crm_id}`}>
+          <td style={tdD}>{campCell(s2.b)}<div style={{fontSize:10.5,color:C.teal}}>{f2(s2.br)}</div></td>
+          <td style={tdD}>{campCell(s2.p)}<div style={{fontSize:10.5,color:C.sub}}>{f2(s2.pr)}</div></td>
+          <td style={tdD}><span style={{color:mCol(s2.margin),fontWeight:700}}>{fmtM(s2.margin)}</span></td>
+          <td style={{...tdD,fontSize:10.5,color:s2.flags.length?C.amber:C.dim}}>{s2.flags.join("; ")||"none"}</td>
+          <td style={{...tdD,whiteSpace:"nowrap"}}>
+            {btn("Confirm",C.green,()=>cmWrite({action:"create",buyer_campaign_crm_id:s2.b.crm_id,publisher_campaign_crm_id:s2.p.crm_id,stage:"Confirmed",source:"suggestion"}),"Writes a Confirmed match to HubSpot")}
+            {btn("Propose",C.teal,()=>cmWrite({action:"create",buyer_campaign_crm_id:s2.b.crm_id,publisher_campaign_crm_id:s2.p.crm_id,stage:"Proposed",source:"suggestion"}),"Saves as Proposed for review")}
+            {btn("Dismiss",C.dim,()=>{const reason=prompt("Why is this not a match? (recorded so it is never re-suggested)");if(!reason)return;cmWrite({action:"create",buyer_campaign_crm_id:s2.b.crm_id,publisher_campaign_crm_id:s2.p.crm_id,stage:"Rejected",source:"suggestion",reason});},"Records a rejection so this pair stops appearing")}
+          </td>
+        </tr>)}
+        </tbody>
+      </table>
+    </div>
+
+    <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+      <div style={{...card,flex:"1 1 400px"}}>
+        <div style={{fontSize:12,fontWeight:800,marginBottom:8,color:demandNo.length?C.amber:C.text}}>Buyer demand without a publisher ({demandNo.length})</div>
+        {demandNo.slice(0,30).map(b=><div key={b.crm_id} style={{display:"flex",gap:8,alignItems:"baseline",padding:"4px 0",borderBottom:`1px solid ${C.border}44`,fontSize:12}}>
+          <b>{b.account_name}</b><span style={{color:C.sub,flex:1}}>{b.name}</span>
+          <span style={{color:C.teal,...mono,fontSize:11.5}}>{f2(rateOf(b))}</span>
+          {b.offer_status==="Ready for Launch"&&chipS("READY BUT UNMATCHED",C.red)}
+        </div>)}
+        {demandNo.length===0&&<div style={{fontSize:11,color:C.dim}}>Every buyer offer has at least one match.</div>}
+      </div>
+      <div style={{...card,flex:"1 1 400px"}}>
+        <div style={{fontSize:12,fontWeight:800,marginBottom:8,color:supplyNo.length?C.amber:C.text}}>Publisher supply without a buyer ({supplyNo.length})</div>
+        {supplyNo.slice(0,30).map(p=><div key={p.crm_id} style={{display:"flex",gap:8,alignItems:"baseline",padding:"4px 0",borderBottom:`1px solid ${C.border}44`,fontSize:12}}>
+          <b>{p.account_name}</b><span style={{color:C.sub,flex:1}}>{p.name}</span>
+          <span style={{color:C.sub,...mono,fontSize:11.5}}>{f2(rateOf(p))}</span>
+        </div>)}
+        {supplyNo.length===0&&<div style={{fontSize:11,color:C.dim}}>Every publisher campaign has at least one match.</div>}
+      </div>
+    </div>
+  </div>;
+}
+// ── Pricing viewer, vertical-first and grouped by company. Pick a vertical,
+// see buyer companies (RPC = pays us) and publisher companies (CPC = we pay).
+// Click a company to see its campaigns, click a campaign to see who it is
+// connected to and that connection's margin. Target 20%+, floor 15%.
+// READ-ONLY: what-if inputs are scratch and never touch a real rate.
+function PricingView({clients,publishers,clientCampaigns,publisherCampaigns,campaignLinks,callgridCalls}){
+  const TARGET=0.20,FLOOR=0.15;
+  const [vert,setVert]=usePersistentState("pr_vert2","");
+  const [openCo,setOpenCo]=useState(null);   // "b<clientId>" | "p<pubId>"
+  const [openCamp,setOpenCamp]=useState(null);
+  const [whatIf,setWhatIf]=useState({});
+  const [calc,setCalc]=useState({rate:"",pay:"",m:"20"});
+  const vertOf=c=>{
+    if(c.vertical)return c.vertical;
+    const n=String(c.name||"").toLowerCase();
+    if(/final expense|\bfe\b|\bvfe\b/.test(n))return "Final Expense";
+    if(/medicare|\bma\b/.test(n))return "Medicare";
+    if(/\baca\b|u65/.test(n))return "ACA";
+    if(/ssdi|disab/.test(n))return "SSDI";
+    if(/auto/.test(n))return "Auto";
+    if(/home/.test(n))return "Home";
+    if(/term/.test(n))return "Term Life";
+    return "Other";
+  };
+  const fmtDur=v=>{const d=String(v||"").replace(/[^0-9]/g,"");return d?`/:${d}`:"";};
+  const dAgo=n=>{const d=new Date();d.setDate(d.getDate()-n);return d.toISOString().slice(0,10);};
+  const cut=dAgo(30),cut7=dAgo(7);
+  const act=React.useMemo(()=>{
+    const pair=new Map(),cc=new Map(),pc=new Map();
+    for(const r of (callgridCalls||[])){
+      const ds=String(r.date||"").slice(0,10);
+      if(ds<cut)continue;
+      const add=(mp,k)=>{if(k==null)return null;let o=mp.get(k);if(!o){o={rev:0,pay:0,bill:0,bill7:0};mp.set(k,o);}return o;};
+      const pk=r.client_campaign_id!=null&&r.publisher_campaign_id!=null?`${r.client_campaign_id}|${r.publisher_campaign_id}`:null;
+      const bill=isBillCall(r);
+      for(const o of [pk&&add(pair,pk),add(cc,r.client_campaign_id),add(pc,r.publisher_campaign_id)]){
+        if(!o)continue;
+        o.rev+=Number(r.revenue||0);o.pay+=Number(r.payout||0);
+        if(bill){o.bill++;if(ds>=cut7)o.bill7++;}
+      }
+    }
+    return {pair,cc,pc};
+  },[callgridCalls,cut,cut7]);
+  const perDay=a=>a?Math.round(a.bill7/7*10)/10:0;
+  const ccs=clientCampaigns.filter(c=>c.active!==false);
+  const pcs=publisherCampaigns.filter(p=>p.active!==false);
+  const verts=React.useMemo(()=>{
+    const m=new Map();
+    for(const c of ccs){const v=vertOf(c);const o=m.get(v)||{b:new Set(),p:new Set(),rev:0};o.b.add(c.client_id);o.rev+=(act.cc.get(c.id)?.rev||0);m.set(v,o);}
+    for(const p of pcs){const v=vertOf(p);const o=m.get(v)||{b:new Set(),p:new Set(),rev:0};o.p.add(p.publisher_id);m.set(v,o);}
+    return [...m.entries()].sort((a,b)=>b[1].rev-a[1].rev);
+  },[ccs,pcs,act]);
+  const sel=verts.some(([v])=>v===vert)?vert:(verts[0]?.[0]||"");
+  const vCcs=ccs.filter(c=>vertOf(c)===sel),vPcs=pcs.filter(p=>vertOf(p)===sel);
+  const linksByCc=new Map(),linksByPc=new Map();
+  for(const l of (campaignLinks||[])){
+    const a2=linksByCc.get(l.client_campaign_id)||[];a2.push(l.publisher_campaign_id);linksByCc.set(l.client_campaign_id,a2);
+    const b2=linksByPc.get(l.publisher_campaign_id)||[];b2.push(l.client_campaign_id);linksByPc.set(l.publisher_campaign_id,b2);
+  }
+  const mPct=(r,p)=>r>0?(r-p)/r:null;
+  const fmtM=m=>m==null?"—":`${(m*100).toFixed(1)}%`;
+  const mCol=m=>m==null?C.dim:m>=TARGET?C.green:m>=FLOOR?C.amber:C.red;
+  const mChip=m=><span style={{fontSize:11,fontWeight:800,color:mCol(m),border:`1.5px solid ${mCol(m)}`,borderRadius:5,padding:"1px 8px",whiteSpace:"nowrap"}}>{fmtM(m)}</span>;
+  const f2=n=>n==null||!isFinite(n)||n===0?"—":`$${n.toFixed(2)}`;
+  const inS={background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,color:C.text,padding:"5px 8px",fontSize:12};
+  const cN=k=>{const v=Number(calc[k]);return isFinite(v)&&calc[k]!==""?v:null;};
+  const cr=cN("rate"),cp=cN("pay"),cm=cN("m")!=null?cN("m")/100:null;
+  const solved=cr!=null&&cp!=null?{label:"Margin",val:fmtM(mPct(cr,cp)),m:mPct(cr,cp)}
+    :cr!=null&&cm!=null?{label:"Max CPC",val:f2(cr*(1-cm)),m:cm}
+    :cp!=null&&cm!=null?{label:"Needed RPC",val:f2(cp/(1-cm)),m:cm}:null;
+
+  // one connection line inside an expanded campaign
+  const connRow=(myCamp,otherCamp,isBuyerSide)=>{
+    const cc2=isBuyerSide?myCamp:otherCamp,pc2=isBuyerSide?otherCamp:myCamp;
+    if(!cc2||!pc2)return null;
+    const rpc=Number(cc2.price_per_call)||0,cpc=Number(pc2.cost_per_call)||0;
+    const rm=mPct(rpc,cpc);
+    const key=`${cc2.id}|${pc2.id}`;
+    const a2=act.pair.get(key);
+    const em=a2&&a2.rev>0?mPct(a2.rev,a2.pay):null;
+    const d7=perDay(a2);
+    const w=whatIf[key]||{};
+    const wr=w.r!==undefined&&w.r!==""?Number(w.r):rpc,wp=w.p!==undefined&&w.p!==""?Number(w.p):cpc;
+    const otherName=isBuyerSide?(publishers.find(x=>x.id===pc2.publisher_id)?.name||"?"):(clients.find(x=>x.id===cc2.client_id)?.name||"?");
+    return <div key={key} style={{padding:"7px 10px",borderTop:`1px solid ${C.border}44`}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+        <span style={{fontSize:12,fontWeight:700}}>{isBuyerSide?"◂ pub":"▸ buyer"} {otherName}</span>
+        <span style={{...mono,fontSize:11.5,color:C.sub}}>{isBuyerSide?`CPC ${f2(cpc)}${fmtDur(pc2.duration_seconds)}`:`RPC ${f2(rpc)}${fmtDur(cc2.duration_seconds)}`}</span>
+        {d7>0&&<span style={{fontSize:10,color:C.dim}}>{d7}/day</span>}
+        {em!=null&&<span style={{fontSize:10,color:mCol(em)}} title="Actual margin, last 30 days">actual {fmtM(em)}</span>}
+        <span style={{marginLeft:"auto"}}>{mChip(rm)}</span>
+      </div>
+      {rm!=null&&rm<TARGET&&<div style={{fontSize:11,color:C.amber,marginTop:4}}>To hit 20%: CPC ≤ <b>{f2(rpc*(1-TARGET))}</b> or RPC ≥ <b>{f2(cpc/(1-TARGET))}</b>{rm<FLOOR?<span style={{color:C.red}}> (below the 15% floor)</span>:null}</div>}
+      <div style={{display:"flex",gap:7,alignItems:"center",marginTop:5,flexWrap:"wrap"}}>
+        <span style={{fontSize:10,color:C.dim}}>what-if</span>
+        <input placeholder={`RPC ${rpc||""}`} value={w.r??""} onChange={e=>setWhatIf(m2=>({...m2,[key]:{...m2[key],r:e.target.value}}))} style={{...inS,width:70,fontSize:11}}/>
+        <input placeholder={`CPC ${cpc||""}`} value={w.p??""} onChange={e=>setWhatIf(m2=>({...m2,[key]:{...m2[key],p:e.target.value}}))} style={{...inS,width:70,fontSize:11}}/>
+        <span style={{fontSize:11}}>→ {mChip(mPct(wr,wp))}</span>
+        {(w.r!==undefined||w.p!==undefined)&&<button onClick={()=>setWhatIf(m2=>{const n2={...m2};delete n2[key];return n2;})} style={{background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:10}}>reset</button>}
+      </div>
+    </div>;
+  };
+
+  const sideList=isBuyer=>{
+    const camps=isBuyer?vCcs:vPcs;
+    const coId=c=>isBuyer?c.client_id:c.publisher_id;
+    const coName=id=>isBuyer?(clients.find(x=>x.id===id)?.name||"?"):(publishers.find(x=>x.id===id)?.name||"?");
+    const groups=new Map();
+    for(const c of camps){const k=coId(c);const g=groups.get(k)||[];g.push(c);groups.set(k,g);}
+    const rows=[...groups.entries()].sort((a,b)=>coName(a[0]).localeCompare(coName(b[0])));
+    return <div style={{...card,flex:"1 1 400px",padding:0,overflow:"hidden",alignSelf:"flex-start"}}>
+      <div style={{padding:"10px 12px",borderBottom:`2px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+        <span style={{fontSize:12,fontWeight:800,letterSpacing:"0.04em"}}>{isBuyer?"BUYERS":"PUBLISHERS"}</span>
+        <span style={{fontSize:10.5,color:C.sub}}>{isBuyer?"RPC (pays us)":"CPC (we pay)"}</span>
+      </div>
+      {rows.length===0&&<div style={{padding:14,fontSize:12,color:C.dim}}>None in {sel}.</div>}
+      {rows.map(([id,gc])=>{
+        const ck=(isBuyer?"b":"p")+id;
+        const open=openCo===ck;
+        const d7=gc.reduce((s,c)=>s+perDay((isBuyer?act.cc:act.pc).get(c.id)),0);
+        const prices=gc.map(c=>Number(isBuyer?c.price_per_call:c.cost_per_call)||0).filter(Boolean);
+        const range=prices.length?(Math.min(...prices)===Math.max(...prices)?f2(prices[0]):`${f2(Math.min(...prices))}–${f2(Math.max(...prices))}`):"—";
+        return <div key={id}>
+          <div onClick={()=>{setOpenCo(open?null:ck);setOpenCamp(null);}}
+            style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderBottom:`1px solid ${C.border}`,cursor:"pointer",background:open?"rgba(255,255,255,0.03)":"transparent"}}>
+            <span style={{color:C.accent,fontSize:11}}>{open?"▾":"▸"}</span>
+            <span style={{fontSize:13.5,fontWeight:700,flex:1,minWidth:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{coName(id)}</span>
+            <span style={{fontSize:10.5,color:C.dim,whiteSpace:"nowrap"}}>{gc.length} campaign{gc.length===1?"":"s"}{d7?` · ${Math.round(d7*10)/10}/day`:""}</span>
+            <span style={{...mono,fontSize:12.5,fontWeight:700,whiteSpace:"nowrap"}}>{range}</span>
+          </div>
+          {open&&gc.sort((a,b)=>String(a.lead_type||a.name).localeCompare(String(b.lead_type||b.name))).map(c=>{
+            const price=Number(isBuyer?c.price_per_call:c.cost_per_call)||0;
+            const links=(isBuyer?linksByCc:linksByPc).get(c.id)||[];
+            const cOpen=openCamp===c.id;
+            const d7c=perDay((isBuyer?act.cc:act.pc).get(c.id));
+            const t=isBuyer?(Number(c.daily_call_target)||0):0;
+            return <div key={c.id} style={{background:"rgba(255,255,255,0.015)"}}>
+              <div onClick={()=>links.length&&setOpenCamp(cOpen?null:c.id)}
+                style={{display:"flex",alignItems:"center",gap:8,padding:"7px 12px 7px 30px",borderBottom:`1px solid ${C.border}66`,cursor:links.length?"pointer":"default"}}>
+                <span style={{color:links.length?C.accent:C.dim,fontSize:10}}>{links.length?(cOpen?"▾":"▸"):"·"}</span>
+                <span style={{fontSize:12,flex:1,minWidth:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{c.lead_type||c.name}</span>
+                {t>0&&<span style={{fontSize:10,color:d7c>=t*0.9?C.green:d7c>=t*0.5?C.amber:C.red,whiteSpace:"nowrap"}}>{d7c}/{t} per day</span>}
+                {!t&&d7c>0&&<span style={{fontSize:10,color:C.dim}}>{d7c}/day</span>}
+                {links.length===0&&price>0&&<span style={{fontSize:10,color:C.amber,whiteSpace:"nowrap"}}>{isBuyer?`not connected · can pay to ${f2(price*(1-TARGET))}`:`not connected · needs RPC ${f2(price/(1-TARGET))}+`}</span>}
+                {links.length>0&&<span style={{fontSize:10,color:C.dim}}>{links.length} conn</span>}
+                <span style={{...mono,fontSize:12.5,fontWeight:800,whiteSpace:"nowrap"}}>{f2(price)}<span style={{fontSize:10.5,color:C.sub,fontWeight:600}}>{fmtDur(c.duration_seconds)}</span></span>
+              </div>
+              {cOpen&&<div style={{padding:"0 12px 6px 38px"}}>
+                {links.map(oid=>{
+                  const other=(isBuyer?publisherCampaigns:clientCampaigns).find(x=>x.id===oid);
+                  return other?connRow(c,other,isBuyer):null;
+                })}
+              </div>}
+            </div>;})}
+        </div>;})}
+    </div>;
+  };
+
+  return <div style={{maxWidth:1020}}>
+    <div style={{display:"flex",alignItems:"baseline",gap:14,flexWrap:"wrap"}}>
+      <h1 style={{fontSize:22,fontWeight:800,margin:"0 0 4px"}}>Pricing</h1>
+      <span style={{fontSize:11.5,color:C.sub}}>RPC = pays us · CPC = we pay · target 20%+, floor 15%</span>
+    </div>
+    <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",margin:"8px 0 14px"}}>
+      <span style={{fontSize:11,fontWeight:700,color:C.sub}}>QUICK CHECK</span>
+      {[["rate","RPC $"],["pay","CPC $"],["m","Margin %"]].map(([k,l])=><input key={k} placeholder={l} value={calc[k]} onChange={e=>setCalc(f=>({...f,[k]:e.target.value}))} style={{...inS,width:80}}/>)}
+      {solved&&<span style={{fontSize:13}}>{solved.label}: <b style={{color:mCol(solved.m)}}>{solved.val}</b></span>}
+      <span style={{fontSize:10,color:C.dim}}>fill any two</span>
+    </div>
+    <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:16}}>
+      {verts.map(([v,o])=><button key={v} onClick={()=>{setVert(v);setOpenCo(null);setOpenCamp(null);}}
+        style={{...card,cursor:"pointer",padding:"11px 18px",minWidth:124,textAlign:"left",border:`2px solid ${sel===v?C.accent:C.border}`}}>
+        <div style={{fontSize:14,fontWeight:800,color:sel===v?C.accent:C.text}}>{v}</div>
+        <div style={{fontSize:10.5,color:C.sub,marginTop:3}}>{o.p.size} pub{o.p.size===1?"":"s"} · {o.b.size} buyer{o.b.size===1?"":"s"}</div>
+      </button>)}
+    </div>
+    <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+      {sideList(true)}
+      {sideList(false)}
+    </div>
+  </div>;
+}
+// ── Sales Pipeline v2 (pipeline manual, Nov 12): campaign-level opportunities.
+// Dashboard-authoritative store (sales_opportunities), HubSpot-linked by stable
+// IDs. Nothing here writes to HubSpot; prospect conversion logic and metrics are
+// read as before. One company → many opportunities, each independent.
+function SalesPipelineV2({pros,acctNames,contracts,me}){
+  const STAGES=[["new","New Prospect Opportunities",C.sub],["discovery","Discovery Call Scheduled",C.teal],["intake_requested","Intake Requested",C.amber],["intake_submitted","Intake Submitted",C.purple],["onboarding","Onboarding",C.accent],["live","Live",C.green]];
+  const STAGE_LABEL=Object.fromEntries([...STAGES.map(([i,l])=>[i,l]),["closed_lost","Closed Lost"]]);
+  const VERTICALS=["Final Expense","Medicare","ACA","SSDI","Auto Insurance","Home Insurance","Home Services","Ping/Post Leads","Term Life","Other"];
+  const [opps,setOpps]=useState(null);
+  const [msaActs,setMsaActs]=useState([]);
+  const [views,setViews]=useState([]);
+  const [evts,setEvts]=useState([]); // events for the open detail
+  const [q,setQ]=usePersistentState("sp2_q","");
+  const [fType,setFType]=usePersistentState("sp2_type","All");
+  const [fVert,setFVert]=usePersistentState("sp2_vert","All");
+  const [fOwner,setFOwner]=usePersistentState("sp2_owner","All");
+  const [fStage,setFStage]=usePersistentState("sp2_stage","All");
+  const [showLost,setShowLost]=useState(false);
+  const [msaOnly,setMsaOnly]=useState(false);
+  const [fupOnly,setFupOnly]=useState(false);
+  const [mode,setMode]=usePersistentState("sp2_mode","board");
+  const [sort,setSort]=usePersistentState("sp2_sort","created_desc");
+  const [detail,setDetail]=useState(null); // opportunity id
+  const [addOpen,setAddOpen]=useState(false);
+  const [add,setAdd]=useState({company_name:"",contact_name:"",contact_email:"",partner_type:"Buyer",vertical:"",offer_text:"",prospect_crm_id:null,account_crm_id:null});
+  const [busy,setBusy]=useState(false);
+  const [calc,setCalc]=useState({calls:"",rate:"",days:"5",weeks:"4"});
+  const [actForm,setActForm]=useState({action:"",pending_on:"Counterparty",owner:""});
+  const load=React.useCallback(async()=>{
+    try{
+      const [o,a,v]=await Promise.all([
+        sbAll("sales_opportunities?select=*").catch(()=>[]),
+        sbAll("sales_msa_actions?select=*").catch(()=>[]),
+        sb("GET","sales_views?select=*&order=name").catch(()=>[]),
+      ]);
+      setOpps(o||[]);setMsaActs(a||[]);setViews(v||[]);
+    }catch(_e){setOpps([]);}
+  },[]);
+  useEffect(()=>{load();},[load]);
+  useEffect(()=>{(async()=>{
+    if(!detail){setEvts([]);return;}
+    try{setEvts(await sb("GET",`sales_opp_events?opp_id=eq.${detail}&select=*&order=at.desc&limit=60`));}catch(_e){setEvts([]);}
+  })();},[detail]);
+
+  const prosById=React.useMemo(()=>new Map((pros||[]).map(p=>[p.crm_id,p])),[pros]);
+  const acctById=React.useMemo(()=>new Map((acctNames||[]).map(a=>[a.crm_id,a.name])),[acctNames]);
+  // display stage: manual moves are truth; a prospect that became an account
+  // floats the card to Onboarding (never mutates the stored stage)
+  const effStage=o=>{
+    if(["closed_lost","live","onboarding"].includes(o.stage))return o.stage;
+    const p=o.prospect_crm_id?prosById.get(o.prospect_crm_id):null;
+    if(o.account_crm_id||(p&&(p.linked_account_crm_id||p.match_status==="confirmed")))return "onboarding";
+    return o.stage;
+  };
+  const acctIdOf=o=>o.account_crm_id||(o.prospect_crm_id?prosById.get(o.prospect_crm_id)?.linked_account_crm_id:null)||null;
+  // 72h MSA action flag: timer runs from the open action's start, cleared only
+  // by a recorded resolution — viewing/edits/syncs never reset it
+  const openActs=msaActs.filter(a=>!a.resolved_at);
+  const hoursOf=a=>Math.floor((Date.now()-new Date(a.started_at).getTime())/36e5);
+  const actsFor=o=>{const aid=acctIdOf(o);const nm=String(o.company_name||"").toLowerCase();
+    return openActs.filter(a=>(aid&&a.account_crm_id===aid)||(a.prospect_crm_id&&a.prospect_crm_id===o.prospect_crm_id)||String(a.company_name||"").toLowerCase()===nm);};
+  const msaFlag=o=>actsFor(o).some(a=>hoursOf(a)>=72);
+  const potential=o=>o.forecast?.monthly!=null?Number(o.forecast.monthly):null;
+
+  async function patchOpp(o,changes,event){
+    await sb("PATCH",`sales_opportunities?id=eq.${o.id}`,{...changes,updated_at:new Date().toISOString()});
+    if(event)await sb("POST","sales_opp_events",{opp_id:o.id,actor:me,...event});
+    setOpps(rows=>rows.map(x=>x.id===o.id?{...x,...changes,updated_at:new Date().toISOString()}:x));
+  }
+  async function moveStage(o,st){
+    if(st===o.stage)return;
+    let extra={};
+    if(st==="closed_lost"){const r=prompt("Closed Lost reason:");if(r==null)return;extra={closed_lost_reason:r||null,closed_lost_at:new Date().toISOString()};}
+    try{await patchOpp(o,{stage:st,...extra},{event:st==="closed_lost"?"closed_lost":(o.stage==="closed_lost"?"reopened":"stage_change"),old_value:o.stage,new_value:st,note:extra.closed_lost_reason||null});}
+    catch(e){alert(`Could not move: ${e?.message||e}`);}
+  }
+  async function createOpp(){
+    if(!add.company_name.trim()||!add.offer_text.trim()){alert("Company and offer details are required.");return;}
+    setBusy(true);
+    try{
+      const id=crypto.randomUUID();
+      await sb("POST","sales_opportunities",{id,company_name:add.company_name.trim(),prospect_crm_id:add.prospect_crm_id,account_crm_id:add.account_crm_id,
+        partner_type:add.partner_type,vertical:add.vertical||null,offer_text:add.offer_text.trim(),contact_name:add.contact_name||null,contact_email:add.contact_email||null,
+        sales_owner:me||null,stage:"new",source:"manual",created_by:me});
+      await sb("POST","sales_opp_events",{opp_id:id,actor:me,event:"created",new_value:"new"});
+      setAddOpen(false);setAdd({company_name:"",contact_name:"",contact_email:"",partner_type:"Buyer",vertical:"",offer_text:"",prospect_crm_id:null,account_crm_id:null});
+      await load();
+    }catch(e){alert(`Could not create: ${e?.message||e}`);}
+    setBusy(false);
+  }
+
+  const ql=q.trim().toLowerCase();
+  const list=(opps||[]).filter(o=>{
+    const st=effStage(o);
+    if(!showLost&&st==="closed_lost")return false;
+    if(fStage!=="All"&&st!==fStage)return false;
+    if(fType!=="All"&&(o.partner_type||"—")!==fType)return false;
+    if(fVert!=="All"&&(o.vertical||"—")!==fVert)return false;
+    if(fOwner!=="All"&&(o.sales_owner||"—")!==fOwner)return false;
+    if(msaOnly&&!msaFlag(o))return false;
+    if(fupOnly&&!(o.next_follow_up&&o.next_follow_up<=new Date().toISOString().slice(0,10)))return false;
+    if(ql&&![o.company_name,o.offer_text,o.contact_name,o.contact_email,o.sales_owner,o.vertical,o.next_action].some(v=>String(v||"").toLowerCase().includes(ql)))return false;
+    return true;
+  });
+  const sorted=[...list].sort((a,b)=>{
+    const s=sort;
+    const v=(o,k)=>String(o[k]||"").toLowerCase();
+    if(s==="company")return v(a,"company_name").localeCompare(v(b,"company_name"));
+    if(s==="potential_desc")return (potential(b)??-1)-(potential(a)??-1);
+    if(s==="followup_asc")return String(a.next_follow_up||"9999").localeCompare(String(b.next_follow_up||"9999"));
+    if(s==="updated_desc")return String(b.updated_at||"").localeCompare(String(a.updated_at||""));
+    if(s==="created_asc")return String(a.created_at||"").localeCompare(String(b.created_at||""));
+    return String(b.created_at||"").localeCompare(String(a.created_at||"")); // created_desc
+  });
+  const byStage=Object.fromEntries(STAGES.map(([id])=>[id,sorted.filter(o=>effStage(o)===id)]));
+  const lostRows=sorted.filter(o=>effStage(o)==="closed_lost");
+  // conversion metrics: same prospect-based calculation as before, relabeled
+  const convN=(pros||[]).filter(p=>p.linked_account_crm_id||p.match_status==="confirmed").length;
+  const potTotal=sorted.filter(o=>effStage(o)!=="closed_lost").reduce((a2,o)=>a2+(potential(o)||0),0);
+  const fmtDay=d=>d?new Date(String(d).slice(0,10)+"T12:00:00").toLocaleDateString("en-US",{month:"short",day:"numeric"}):"—";
+  const fmt$=n=>n==null?"—":"$"+Math.round(n).toLocaleString();
+  const selS={background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,color:C.text,padding:"6px 9px",fontSize:12};
+  const chipS=(t,col)=><span style={{fontSize:10,fontWeight:700,color:col||C.sub,border:`1px solid ${col||C.border}`,borderRadius:4,padding:"1px 6px",whiteSpace:"nowrap"}}>{t}</span>;
+  const stageCol=st=>(STAGES.find(([i])=>i===st)||[])[2]||C.red;
+
+  function exportCsv(){
+    const esc=v=>{const s2=String(v??"");return /[",\n]/.test(s2)?`"${s2.replace(/"/g,'""')}"`:s2;};
+    const H=["Company","Opportunity (offer)","Partner type","Vertical","Sales owner","Contact","Contact email","Stage","Potential monthly","Forecast basis","Discovery","Next follow-up","Next action","Closed lost reason","Closed lost at","Created","Last activity","MSA action required","HubSpot prospect ID","HubSpot company ID"];
+    const rows=sorted.map(o=>[o.company_name,o.offer_text,o.partner_type,o.vertical,o.sales_owner,o.contact_name,o.contact_email,STAGE_LABEL[effStage(o)],potential(o)??"",o.forecast?`${o.forecast.calls_day||""} calls/day @ $${o.forecast.rate||""}`:"",o.discovery_at?String(o.discovery_at).slice(0,16).replace("T"," "):"",o.next_follow_up||"",o.next_action||"",o.closed_lost_reason||"",o.closed_lost_at?String(o.closed_lost_at).slice(0,10):"",String(o.created_at||"").slice(0,10),String(o.updated_at||"").slice(0,10),msaFlag(o)?"YES":"",o.prospect_crm_id||"",o.account_crm_id||acctIdOf(o)||""]);
+    const csv=[H,...rows].map(r=>r.map(esc).join(",")).join("\n");
+    const a2=document.createElement("a");a2.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a2.download=`opportunities_${new Date().toISOString().slice(0,10)}.csv`;a2.click();
+  }
+  const applyView=cfg=>{setQ(cfg.q||"");setFType(cfg.type||"All");setFVert(cfg.vert||"All");setFOwner(cfg.owner||"All");setFStage(cfg.stage||"All");setShowLost(!!cfg.lost);setMsaOnly(!!cfg.msa);setFupOnly(!!cfg.fup);setSort(cfg.sort||"created_desc");setMode(cfg.mode||"board");};
+  async function saveView(){
+    const name=prompt("Name this view:");if(!name)return;
+    const shared=confirm("Share this view with the team? (Cancel keeps it private to you)");
+    try{await sb("POST","sales_views",{name,owner:me,shared,config:{q,type:fType,vert:fVert,owner:fOwner,stage:fStage,lost:showLost,msa:msaOnly,fup:fupOnly,sort,mode}});setViews(await sb("GET","sales_views?select=*&order=name"));}
+    catch(e){alert(`Could not save: ${e?.message||e}`);}
+  }
+  const PRESETS=[
+    ["All Active",{}],
+    ["My Opportunities",{owner:me}],
+    ["Buyer",{type:"Buyer"}],["Publisher",{type:"Publisher"}],
+    ["Highest Potential",{sort:"potential_desc",mode:"table"}],
+    ["Follow-Ups Due",{fup:true}],
+    ["MSA Action Required",{msa:true}],
+    ["Closed Lost",{lost:true,stage:"closed_lost",mode:"table"}],
+  ];
+
+  // ── detail panel pieces ──
+  const detailOpp=(opps||[]).find(o=>o.id===detail);
+  useEffect(()=>{if(detailOpp)setCalc({calls:String(detailOpp.forecast?.calls_day??""),rate:String(detailOpp.forecast?.rate??""),days:String(detailOpp.forecast?.days_week??"5"),weeks:String(detailOpp.forecast?.weeks_month??"4")});},[detail]); // eslint-disable-line
+  const calcN=k=>Number(calc[k])||0;
+  const daily=calcN("calls")*calcN("rate"),weekly=daily*calcN("days"),monthly=weekly*calcN("weeks");
+  const editRow=(label,node)=><div style={{display:"flex",gap:8,alignItems:"center",marginBottom:7}}><span style={{fontSize:10.5,color:C.sub,minWidth:110,textTransform:"uppercase",letterSpacing:"0.04em",fontWeight:700}}>{label}</span>{node}</div>;
+  const inS={...selS,flex:1};
+  function msaPanel(o){
+    const aid=acctIdOf(o);
+    const docs=(contracts||[]).filter(k=>aid&&k.account_crm_id===aid&&/MSA/i.test(k.document_type||""));
+    const acts2=actsFor(o);
+    return <div style={{borderTop:`1px solid ${C.border}`,marginTop:12,paddingTop:10}}>
+      <div style={{fontSize:11,fontWeight:800,color:C.sub,letterSpacing:"0.05em",marginBottom:6}}>MSA (company level — shared across this company's opportunities)</div>
+      {docs.length===0&&<div style={{fontSize:11,color:C.dim,marginBottom:6}}>{aid?"No MSA documents in Contracts & Agreements for this account yet.":"No linked account yet — MSA documents attach once intake creates the account."}</div>}
+      {docs.map(k=><div key={k.crm_id} style={{fontSize:11.5,marginBottom:4,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        {chipS(k.status||"—",k.status==="Signed"?C.green:C.amber)}<span style={{color:C.text}}>{k.name}</span>
+        {k.signed_date&&<span style={{color:C.sub}}>signed {fmtDay(k.signed_date)}</span>}
+        {(k.workdrive_file_link||k.signed_pdf_link)&&<a href={k.workdrive_file_link||k.signed_pdf_link} target="_blank" rel="noreferrer" style={{color:C.teal,fontSize:10.5}}>doc ↗</a>}
+      </div>)}
+      <div style={{fontSize:11,fontWeight:800,color:C.sub,letterSpacing:"0.05em",margin:"10px 0 5px"}}>Pending actions (72h flag runs from each action's start)</div>
+      {acts2.length===0&&<div style={{fontSize:11,color:C.dim}}>No open actions.</div>}
+      {acts2.map(a2=>{const h=hoursOf(a2);return <div key={a2.id} style={{fontSize:11.5,marginBottom:4,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        {h>=72?chipS(`ACTION REQUIRED — ${h}h`,C.red):chipS(`${h}h`,h>=48?C.amber:C.sub)}
+        <span>{a2.action}</span><span style={{color:C.sub}}>pending on {a2.pending_on||"—"}{a2.owner?` · ${a2.owner}`:""}</span>
+        <button onClick={async()=>{const note=prompt("Resolution (what happened):");if(note==null)return;try{await sb("PATCH",`sales_msa_actions?id=eq.${a2.id}`,{resolved_at:new Date().toISOString(),resolved_note:note||null});setMsaActs(rows=>rows.map(x=>x.id===a2.id?{...x,resolved_at:new Date().toISOString()}:x));}catch(e){alert(String(e?.message||e));}}}
+          style={{background:"none",border:`1px solid ${C.border}`,borderRadius:4,color:C.green,cursor:"pointer",fontSize:10,padding:"2px 8px"}}>Resolve</button>
+      </div>;})}
+      <div style={{display:"flex",gap:6,marginTop:6,flexWrap:"wrap"}}>
+        <input placeholder="New pending action (e.g. Sent for signature)…" value={actForm.action} onChange={e=>setActForm(f=>({...f,action:e.target.value}))} style={{...selS,width:240}}/>
+        <select value={actForm.pending_on} onChange={e=>setActForm(f=>({...f,pending_on:e.target.value}))} style={selS}><option>Counterparty</option><option>Internal</option></select>
+        <input placeholder="Owner" value={actForm.owner} onChange={e=>setActForm(f=>({...f,owner:e.target.value}))} style={{...selS,width:120}}/>
+        <button disabled={!actForm.action.trim()} onClick={async()=>{try{await sb("POST","sales_msa_actions",{company_name:o.company_name,account_crm_id:aid,prospect_crm_id:o.prospect_crm_id,action:actForm.action.trim(),pending_on:actForm.pending_on,owner:actForm.owner||null,created_by:me});setActForm({action:"",pending_on:"Counterparty",owner:""});await load();}catch(e){alert(String(e?.message||e));}}}
+          style={{background:C.accent,border:"none",borderRadius:4,color:C.accentFg,cursor:"pointer",fontSize:11,fontWeight:700,padding:"4px 10px"}}>Start action</button>
+      </div>
+    </div>;
+  }
+
+  if(opps===null)return <div style={{color:C.sub,fontSize:13,padding:"30px 0"}}>Loading the pipeline… (if this never loads, run the sales_pipeline_v2 migration)</div>;
+
+  const sug=add.company_name.trim().length>=2?[
+    ...(pros||[]).filter(p=>String(p.name||"").toLowerCase().includes(add.company_name.trim().toLowerCase())).slice(0,4).map(p=>({t:"prospect",id:p.crm_id,name:p.name})),
+    ...(acctNames||[]).filter(a2=>String(a2.name||"").toLowerCase().includes(add.company_name.trim().toLowerCase())).slice(0,4).map(a2=>({t:"account",id:a2.crm_id,name:a2.name})),
+  ].slice(0,6):[];
+
+  return <div>
+    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:8}}>
+      <button onClick={()=>setAddOpen(true)} style={{background:C.accent,border:"none",borderRadius:6,color:C.accentFg,padding:"7px 16px",fontSize:12.5,fontWeight:800,cursor:"pointer"}}>+ Add Opportunity</button>
+      <div style={{width:200}}><Input placeholder="Search opportunities…" value={q} onChange={e=>setQ(e.target.value)}/></div>
+      <select value={fType} onChange={e=>setFType(e.target.value)} style={selS}><option>All</option><option>Buyer</option><option>Publisher</option></select>
+      <select value={fVert} onChange={e=>setFVert(e.target.value)} style={selS}><option>All</option>{[...new Set([...VERTICALS,...((opps||[]).map(o=>o.vertical).filter(Boolean))])].map(v=><option key={v}>{v}</option>)}</select>
+      <select value={fOwner} onChange={e=>setFOwner(e.target.value)} style={selS}><option>All</option>{[...new Set((opps||[]).map(o=>o.sales_owner).filter(Boolean))].sort().map(v=><option key={v}>{v}</option>)}</select>
+      <select value={fStage} onChange={e=>setFStage(e.target.value)} style={selS}><option>All</option>{Object.entries(STAGE_LABEL).map(([i,l])=><option key={i} value={i}>{l}</option>)}</select>
+      <select value={sort} onChange={e=>setSort(e.target.value)} style={selS}>
+        <option value="created_desc">Newest first</option><option value="created_asc">Oldest first</option><option value="company">Company A–Z</option>
+        <option value="potential_desc">Potential revenue (high)</option><option value="followup_asc">Next follow-up</option><option value="updated_desc">Last activity</option>
+      </select>
+      <label style={{display:"flex",gap:5,alignItems:"center",fontSize:11,color:C.sub,cursor:"pointer"}}><input type="checkbox" checked={showLost} onChange={e=>setShowLost(e.target.checked)}/>Closed Lost</label>
+      <div style={{marginLeft:"auto",display:"flex",gap:6}}>
+        <button onClick={()=>setMode(mode==="board"?"table":"board")} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.sub,padding:"6px 12px",fontSize:11,cursor:"pointer"}}>{mode==="board"?"Table view":"Board view"}</button>
+        <button onClick={exportCsv} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.sub,padding:"6px 12px",fontSize:11,cursor:"pointer"}}>Export CSV</button>
+        <button onClick={saveView} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.sub,padding:"6px 12px",fontSize:11,cursor:"pointer"}}>Save view</button>
+      </div>
+    </div>
+    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10,alignItems:"center"}}>
+      {PRESETS.map(([l,cfg])=><button key={l} onClick={()=>applyView(cfg)} style={{background:"transparent",border:`1px solid ${C.border}`,borderRadius:12,color:C.sub,padding:"3px 10px",fontSize:10.5,cursor:"pointer"}}>{l}</button>)}
+      {views.filter(v=>v.shared||v.owner===me).map(v=><span key={v.id} style={{display:"inline-flex",alignItems:"center",gap:4,border:`1px solid ${C.teal}66`,borderRadius:12,padding:"3px 10px"}}>
+        <button onClick={()=>applyView(v.config||{})} style={{background:"none",border:"none",color:C.teal,fontSize:10.5,cursor:"pointer",padding:0}}>{v.name}{v.shared?" (shared)":""}</button>
+        {v.owner===me&&<button onClick={async()=>{if(!confirm(`Delete the view "${v.name}"?`))return;await sb("DELETE",`sales_views?id=eq.${v.id}`);setViews(vs=>vs.filter(x=>x.id!==v.id));}} style={{background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:10,padding:0}}>✕</button>}
+      </span>)}
+      {msaOnly&&chipS("filter: MSA action required",C.red)}{fupOnly&&chipS("filter: follow-ups due",C.amber)}
+      {(msaOnly||fupOnly)&&<button onClick={()=>{setMsaOnly(false);setFupOnly(false);}} style={{background:"none",border:"none",color:C.dim,fontSize:10.5,cursor:"pointer"}}>clear</button>}
+    </div>
+    <div style={{display:"flex",gap:12,marginBottom:14,flexWrap:"wrap"}}>
+      <div style={{...card,flex:1,minWidth:150}}><div style={{fontSize:11,color:C.sub}}>ACTIVE OPPORTUNITIES</div><div style={{fontSize:22,fontWeight:800,marginTop:6}}>{sorted.filter(o=>!["closed_lost","live"].includes(effStage(o))).length}</div><div style={{fontSize:10,color:C.dim}}>filtered set</div></div>
+      <div style={{...card,flex:1,minWidth:150}}><div style={{fontSize:11,color:C.sub}}>MOVED TO ONBOARDING</div><div style={{fontSize:22,fontWeight:800,color:C.green,marginTop:6}}>{convN}</div><div style={{fontSize:10,color:C.dim}}>companies, all time</div></div>
+      <div style={{...card,flex:1,minWidth:150}}><div style={{fontSize:11,color:C.sub}}>ONBOARDING CONVERSION</div><div style={{fontSize:22,fontWeight:800,marginTop:6}}>{(pros||[]).length?Math.round(convN/(pros||[]).length*100):0}%</div><div style={{fontSize:10,color:C.dim}}>company based, as before</div></div>
+      <div style={{...card,flex:1,minWidth:150}}><div style={{fontSize:11,color:C.sub}}>POTENTIAL / MO</div><div style={{fontSize:22,fontWeight:800,color:C.teal,marginTop:6}}>{fmt$(potTotal)}</div><div style={{fontSize:10,color:C.dim}}>saved forecasts, filtered set</div></div>
+      <div style={{...card,flex:1,minWidth:150,cursor:"pointer"}} onClick={()=>{setMsaOnly(true);setShowLost(false);}}><div style={{fontSize:11,color:C.sub}}>MSA ACTION REQUIRED</div><div style={{fontSize:22,fontWeight:800,color:openActs.some(a2=>hoursOf(a2)>=72)?C.red:C.green,marginTop:6}}>{[...new Set(openActs.filter(a2=>hoursOf(a2)>=72).map(a2=>a2.company_name))].length}</div><div style={{fontSize:10,color:C.dim}}>companies over 72h</div></div>
+    </div>
+
+    {mode==="board"?<div style={{display:"flex",gap:12,alignItems:"flex-start",overflowX:"auto",paddingBottom:8}}>
+      {STAGES.map(([id,label,col])=><div key={id} style={{flex:"1 1 0",minWidth:215}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8,padding:"0 2px"}}>
+          <span style={{fontSize:10.5,fontWeight:800,color:col,textTransform:"uppercase",letterSpacing:"0.05em"}}>{label}</span>
+          <span style={{fontSize:11,fontWeight:700,color:C.sub}}>{byStage[id].length}</span>
+        </div>
+        {byStage[id].length===0&&<div style={{...card,padding:"12px",fontSize:11,color:C.dim,textAlign:"center"}}>None</div>}
+        {byStage[id].map(o=>{const p=o.prospect_crm_id?prosById.get(o.prospect_crm_id):null;const flag=msaFlag(o);return <div key={o.id} onClick={()=>setDetail(o.id)} style={{...card,padding:"10px 12px",marginBottom:8,borderLeft:`3px solid ${col}`,cursor:"pointer"}}>
+          <div style={{display:"flex",justifyContent:"space-between",gap:6,alignItems:"baseline"}}>
+            <span style={{fontSize:12.5,fontWeight:700,color:C.text}}>{o.company_name}</span>
+            {o.partner_type&&chipS(o.partner_type,o.partner_type==="Buyer"?C.teal:C.purple)}
+          </div>
+          <div style={{fontSize:11,color:C.text,marginTop:3,overflow:"hidden",textOverflow:"ellipsis",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{o.offer_text||"—"}</div>
+          <div style={{fontSize:10.5,color:C.sub,marginTop:3}}>{o.vertical||""}{o.sales_owner?` · ${o.sales_owner}`:""}{o.contact_name?` · ${o.contact_name}`:""}</div>
+          {potential(o)!=null&&<div style={{fontSize:10.5,color:C.teal,marginTop:2}}>Potential {fmt$(potential(o))}/mo</div>}
+          {flag&&<div style={{marginTop:3}}>{chipS("MSA ACTION REQUIRED",C.red)}</div>}
+          {id==="onboarding"&&acctIdOf(o)&&<div style={{fontSize:10.5,color:C.green,marginTop:2}}>→ {acctById.get(acctIdOf(o))||"account linked"}</div>}
+          {p&&id!=="onboarding"&&p.intake_status&&p.intake_status!=="Not Requested"&&<div style={{fontSize:10,color:C.sub,marginTop:2}}>Company intake: {p.intake_status}</div>}
+          {o.next_follow_up&&<div style={{fontSize:10.5,color:o.next_follow_up<=new Date().toISOString().slice(0,10)?C.red:C.amber,marginTop:2}}>Follow up {fmtDay(o.next_follow_up)}</div>}
+        </div>;})}
+      </div>)}
+    </div>
+    :<div style={{...card,overflowX:"auto"}}>
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:1150}}>
+        <thead><tr>{["Company","Offer","Type","Vertical","Owner","Contact","Stage","Potential/mo","Follow-up","Created","MSA",""].map(h=><th key={h} style={{padding:"6px 8px",borderBottom:`2px solid ${C.border}`,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",color:C.sub,textAlign:"left",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+        <tbody>
+        {[...sorted,...(showLost?[]:[])].length===0&&<tr><td style={{padding:10,color:C.dim,fontSize:12}} colSpan={12}>Nothing matches.</td></tr>}
+        {sorted.map(o=>{const st=effStage(o);return <tr key={o.id} style={{cursor:"pointer"}} onClick={()=>setDetail(o.id)}>
+          <td style={{padding:"7px 8px",borderBottom:`1px solid ${C.border}`,fontSize:12,fontWeight:700}}>{o.company_name}</td>
+          <td style={{padding:"7px 8px",borderBottom:`1px solid ${C.border}`,fontSize:11.5,maxWidth:260}}>{String(o.offer_text||"").slice(0,90)}</td>
+          <td style={{padding:"7px 8px",borderBottom:`1px solid ${C.border}`}}>{o.partner_type?chipS(o.partner_type,o.partner_type==="Buyer"?C.teal:C.purple):"—"}</td>
+          <td style={{padding:"7px 8px",borderBottom:`1px solid ${C.border}`,fontSize:11.5}}>{o.vertical||"—"}</td>
+          <td style={{padding:"7px 8px",borderBottom:`1px solid ${C.border}`,fontSize:11.5}}>{o.sales_owner||"—"}</td>
+          <td style={{padding:"7px 8px",borderBottom:`1px solid ${C.border}`,fontSize:11.5}}>{o.contact_name||"—"}</td>
+          <td style={{padding:"7px 8px",borderBottom:`1px solid ${C.border}`}}>{chipS(STAGE_LABEL[st],stageCol(st))}</td>
+          <td style={{padding:"7px 8px",borderBottom:`1px solid ${C.border}`,fontSize:11.5,color:C.teal}}>{potential(o)!=null?fmt$(potential(o)):"—"}</td>
+          <td style={{padding:"7px 8px",borderBottom:`1px solid ${C.border}`,fontSize:11.5}}>{o.next_follow_up?fmtDay(o.next_follow_up):"—"}</td>
+          <td style={{padding:"7px 8px",borderBottom:`1px solid ${C.border}`,fontSize:11.5,color:C.sub}}>{String(o.created_at||"").slice(0,10)}</td>
+          <td style={{padding:"7px 8px",borderBottom:`1px solid ${C.border}`}}>{msaFlag(o)?chipS("72h+",C.red):""}</td>
+          <td style={{padding:"7px 8px",borderBottom:`1px solid ${C.border}`}}>{st==="closed_lost"&&<button onClick={e=>{e.stopPropagation();moveStage(o,"new");}} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:4,color:C.teal,cursor:"pointer",fontSize:10,padding:"2px 8px"}}>Reopen</button>}</td>
+        </tr>;})}
+        </tbody>
+      </table>
+    </div>}
+    <div style={{fontSize:11,color:C.dim,marginTop:10}}>One company can hold many opportunities; each moves independently. Opportunities link to HubSpot prospects/accounts by stable ID — nothing here writes to HubSpot. Closed Lost is kept for history (toggle above). Sorting and filters never change a stage.</div>
+
+    {addOpen&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={()=>setAddOpen(false)}>
+      <div style={{...card,width:460,maxWidth:"94vw",maxHeight:"88vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>
+        <div style={{fontSize:15,fontWeight:700,marginBottom:4}}>Add Opportunity</div>
+        <div style={{fontSize:10.5,color:C.dim,marginBottom:12}}>Six quick inputs. Picking an existing company links it — no duplicate prospects or accounts are created, and nothing is written to HubSpot from this form.</div>
+        {editRow("Company",<div style={{flex:1,position:"relative"}}>
+          <input value={add.company_name} onChange={e=>setAdd(f=>({...f,company_name:e.target.value,prospect_crm_id:null,account_crm_id:null}))} placeholder="Search or type a company…" style={{...selS,width:"100%",boxSizing:"border-box"}}/>
+          {sug.length>0&&!add.prospect_crm_id&&!add.account_crm_id&&<div style={{position:"absolute",top:"100%",left:0,right:0,background:C.card||C.bg,border:`1px solid ${C.border}`,borderRadius:6,zIndex:10}}>
+            {sug.map(s2=><div key={s2.t+s2.id} onClick={()=>setAdd(f=>({...f,company_name:s2.name,prospect_crm_id:s2.t==="prospect"?s2.id:null,account_crm_id:s2.t==="account"?s2.id:null}))}
+              style={{padding:"6px 10px",fontSize:11.5,cursor:"pointer",borderBottom:`1px solid ${C.border}`}}>{s2.name} <span style={{color:C.dim,fontSize:10}}>({s2.t==="prospect"?"existing prospect":"existing account"})</span></div>)}
+          </div>}
+          {(add.prospect_crm_id||add.account_crm_id)&&<div style={{fontSize:10,color:C.green,marginTop:3}}>Linked to existing {add.prospect_crm_id?"prospect":"account"} ✓</div>}
+        </div>)}
+        {editRow("Contact name",<input value={add.contact_name} onChange={e=>setAdd(f=>({...f,contact_name:e.target.value}))} style={inS}/>)}
+        {editRow("Contact email",<input value={add.contact_email} onChange={e=>setAdd(f=>({...f,contact_email:e.target.value}))} style={inS}/>)}
+        {editRow("Partner type",<select value={add.partner_type} onChange={e=>setAdd(f=>({...f,partner_type:e.target.value}))} style={inS}><option>Buyer</option><option>Publisher</option></select>)}
+        {editRow("Vertical",<select value={add.vertical} onChange={e=>setAdd(f=>({...f,vertical:e.target.value}))} style={inS}><option value="">—</option>{VERTICALS.map(v=><option key={v}>{v}</option>)}</select>)}
+        <div style={{marginBottom:10}}>
+          <div style={{fontSize:10.5,color:C.sub,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Offer details / expected call volume</div>
+          <textarea value={add.offer_text} onChange={e=>setAdd(f=>({...f,offer_text:e.target.value}))} rows={3} placeholder={'e.g. "FE CTV $50/30s, around 100 calls/day"'} style={{...selS,width:"100%",boxSizing:"border-box",resize:"vertical"}}/>
+        </div>
+        <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+          <button onClick={()=>setAddOpen(false)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.sub,padding:"7px 14px",fontSize:12,cursor:"pointer"}}>Cancel</button>
+          <button disabled={busy} onClick={createOpp} style={{background:C.accent,border:"none",borderRadius:6,color:C.accentFg,padding:"7px 16px",fontSize:12,fontWeight:700,cursor:"pointer"}}>{busy?"Saving…":"Create"}</button>
+        </div>
+      </div>
+    </div>}
+
+    {detailOpp&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={()=>setDetail(null)}>
+      <div style={{...card,width:640,maxWidth:"95vw",maxHeight:"90vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10,flexWrap:"wrap"}}>
+          <div style={{fontSize:16,fontWeight:800}}>{detailOpp.company_name} <span style={{fontSize:12,fontWeight:400,color:C.sub}}>— {String(detailOpp.offer_text||"").slice(0,60)}</span></div>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            {detailOpp.prospect_crm_id&&crmUrl("prospect",detailOpp.prospect_crm_id)&&<a href={crmUrl("prospect",detailOpp.prospect_crm_id)} target="_blank" rel="noreferrer" style={{fontSize:11,color:C.teal}}>HubSpot ↗</a>}
+            <button onClick={()=>setDetail(null)} style={{background:"none",border:"none",color:C.sub,cursor:"pointer",fontSize:16}}>✕</button>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:16,flexWrap:"wrap",marginTop:12}}>
+          <div style={{flex:"1 1 280px"}}>
+            {editRow("Stage",<select value={detailOpp.stage} onChange={e=>moveStage(detailOpp,e.target.value)} style={inS}>{Object.entries(STAGE_LABEL).map(([i,l])=><option key={i} value={i}>{l}</option>)}</select>)}
+            {editRow("Offer",<textarea value={detailOpp.offer_text||""} onChange={e=>setOpps(rows=>rows.map(x=>x.id===detailOpp.id?{...x,offer_text:e.target.value}:x))} onBlur={e=>patchOpp(detailOpp,{offer_text:e.target.value},{event:"edit",note:"offer_text"})} rows={2} style={{...inS,resize:"vertical"}}/>)}
+            {editRow("Contact",<input value={detailOpp.contact_name||""} onChange={e=>setOpps(rows=>rows.map(x=>x.id===detailOpp.id?{...x,contact_name:e.target.value}:x))} onBlur={e=>patchOpp(detailOpp,{contact_name:e.target.value||null})} style={inS}/>)}
+            {editRow("Email",<input value={detailOpp.contact_email||""} onChange={e=>setOpps(rows=>rows.map(x=>x.id===detailOpp.id?{...x,contact_email:e.target.value}:x))} onBlur={e=>patchOpp(detailOpp,{contact_email:e.target.value||null})} style={inS}/>)}
+            {editRow("Sales owner",<input value={detailOpp.sales_owner||""} onChange={e=>setOpps(rows=>rows.map(x=>x.id===detailOpp.id?{...x,sales_owner:e.target.value}:x))} onBlur={e=>patchOpp(detailOpp,{sales_owner:e.target.value||null})} style={inS}/>)}
+            {editRow("Vertical",<select value={detailOpp.vertical||""} onChange={e=>patchOpp(detailOpp,{vertical:e.target.value||null})} style={inS}><option value="">—</option>{VERTICALS.map(v=><option key={v}>{v}</option>)}</select>)}
+            {editRow("Discovery",<input type="datetime-local" value={detailOpp.discovery_at?String(detailOpp.discovery_at).slice(0,16):""} onChange={e=>patchOpp(detailOpp,{discovery_at:e.target.value?new Date(e.target.value).toISOString():null})} style={inS}/>)}
+            {editRow("Follow-up",<input type="date" value={detailOpp.next_follow_up||""} onChange={e=>patchOpp(detailOpp,{next_follow_up:e.target.value||null})} style={inS}/>)}
+            {editRow("Next action",<input value={detailOpp.next_action||""} onChange={e=>setOpps(rows=>rows.map(x=>x.id===detailOpp.id?{...x,next_action:e.target.value}:x))} onBlur={e=>patchOpp(detailOpp,{next_action:e.target.value||null})} style={inS}/>)}
+            {detailOpp.stage==="closed_lost"&&<div style={{fontSize:11.5,color:C.red,marginTop:4}}>Closed Lost {detailOpp.closed_lost_at?fmtDay(detailOpp.closed_lost_at):""}{detailOpp.closed_lost_reason?` — ${detailOpp.closed_lost_reason}`:""}</div>}
+          </div>
+          <div style={{flex:"1 1 240px"}}>
+            <div style={{fontSize:11,fontWeight:800,color:C.sub,letterSpacing:"0.05em",marginBottom:6}}>Potential Revenue (dashboard-only estimate — never a contractual figure)</div>
+            {[["calls","Calls / day"],["rate","Rate per call ($)"],["days","Days / week"],["weeks","Weeks / month"]].map(([k,l])=><div key={k} style={{display:"flex",gap:8,alignItems:"center",marginBottom:5}}>
+              <span style={{fontSize:10.5,color:C.sub,minWidth:110}}>{l}</span>
+              <input value={calc[k]} onChange={e=>setCalc(f=>({...f,[k]:e.target.value}))} style={{...selS,width:90}}/>
+            </div>)}
+            <div style={{fontSize:12,marginTop:6,color:C.text}}>Daily <b>{fmt$(daily)}</b> · Weekly <b>{fmt$(weekly)}</b> · Monthly <b style={{color:C.teal}}>{fmt$(monthly)}</b></div>
+            <div style={{display:"flex",gap:6,marginTop:8}}>
+              <button onClick={()=>patchOpp(detailOpp,{forecast:{calls_day:calcN("calls"),rate:calcN("rate"),days_week:calcN("days"),weeks_month:calcN("weeks"),daily,weekly,monthly,saved_at:new Date().toISOString()}},{event:"forecast_saved",new_value:String(monthly)})} disabled={!daily}
+                style={{background:C.accent,border:"none",borderRadius:4,color:C.accentFg,cursor:"pointer",fontSize:11,fontWeight:700,padding:"4px 12px"}}>Save to opportunity</button>
+              {detailOpp.forecast&&<button onClick={()=>patchOpp(detailOpp,{forecast:null},{event:"forecast_cleared"})} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:4,color:C.sub,cursor:"pointer",fontSize:11,padding:"4px 10px"}}>Clear</button>}
+            </div>
+            {!detailOpp.forecast&&<div style={{fontSize:10,color:C.dim,marginTop:4}}>No forecast saved — not calculated, never assumed zero.</div>}
+          </div>
+        </div>
+        {msaPanel(detailOpp)}
+        <div style={{borderTop:`1px solid ${C.border}`,marginTop:12,paddingTop:10}}>
+          <div style={{fontSize:11,fontWeight:800,color:C.sub,letterSpacing:"0.05em",marginBottom:6}}>History</div>
+          {evts.length===0&&<div style={{fontSize:11,color:C.dim}}>No events yet.</div>}
+          {evts.map(ev=><div key={ev.id} style={{fontSize:11,color:C.sub,marginBottom:3}}>
+            {String(ev.at||"").slice(0,16).replace("T"," ")} · <b style={{color:C.text}}>{ev.event}</b>{ev.old_value?` ${STAGE_LABEL[ev.old_value]||ev.old_value} → ${STAGE_LABEL[ev.new_value]||ev.new_value}`:(ev.new_value?` ${STAGE_LABEL[ev.new_value]||ev.new_value}`:"")}{ev.note?` — ${ev.note}`:""}{ev.actor?` (${ev.actor})`:""}
+          </div>)}
+        </div>
+      </div>
+    </div>}
+  </div>;
+}
 function CRM({clients,publishers,clientCampaigns,publisherCampaigns,currentUser}) {
-  const [view,setView]=usePersistentState("crm_view","directory");
+  const [view,setView]=usePersistentState("crm_view","accounts");
+  const [obCamps,setObCamps]=useState([]);
+  const [obCons,setObCons]=useState([]);
+  const [obMatches,setObMatches]=useState([]);
+  const [obPros,setObPros]=useState([]);
+  const [obAcctNames,setObAcctNames]=useState([]);
+  const [spQ,setSpQ]=usePersistentState("crm_sp_q","");
+  const [spType,setSpType]=usePersistentState("crm_sp_type","All");
+  const [ocQ,setOcQ]=usePersistentState("crm_oc_q","");
+  const [ocSide,setOcSide]=usePersistentState("crm_oc_side","All");
+  const [ocOffer,setOcOffer]=usePersistentState("crm_oc_offer","All");
+  const [ocCamp,setOcCamp]=usePersistentState("crm_oc_camp","All");
+  const [ocOwner,setOcOwner]=usePersistentState("crm_oc_owner","All");
+  const [ocOpen,setOcOpen]=useState(null);
+  const [ocAll,setOcAll]=useState(false);
+  const [agQ,setAgQ]=usePersistentState("crm_ag_q","");
+  const [agType,setAgType]=usePersistentState("crm_ag_type","All");
+  const [agStatus,setAgStatus]=usePersistentState("crm_ag_status","All");
+  const [agSide,setAgSide]=usePersistentState("crm_ag_side","All");
+  const [agMatch,setAgMatch]=usePersistentState("crm_ag_match","All");
+  const [agOpen,setAgOpen]=useState(null);
+  const [agAll,setAgAll]=useState(false);
+  const [matchSide,setMatchSide]=useState("buyer");
+  const [matchQ,setMatchQ]=useState("");
+  const [matchSel,setMatchSel]=useState("");
+  const [matchBusy,setMatchBusy]=useState(false);
   const [accounts,setAccounts]=useState([]);
   const [links,setLinks]=useState([]);
   const [notes,setNotes]=useState([]);
@@ -12032,15 +14476,30 @@ function CRM({clients,publishers,clientCampaigns,publisherCampaigns,currentUser}
   const [fMsa,setFMsa]=usePersistentState("crm_fmsa","All");
   const [detail,setDetail]=useState(null);
   const [noteDraft,setNoteDraft]=useState("");
+  const [histRows,setHistRows]=useState(null);
+  const [zAll,setZAll]=useState(null);     // full HubSpot record for the open account detail
+  const [zMeta,setZMeta]=useState(null);   // Accounts field metadata (labels/types)
+  const [zAllOpen,setZAllOpen]=useState(false);
+  const [hiQ,setHiQ]=useState("");
+  const [hiKind,setHiKind]=useState("All");
+  const [hiSide,setHiSide]=useState("All");
+  const [hiOpen,setHiOpen]=useState(null);
   const me=currentUser?.email||"";
+  useEffect(()=>{if(view==="history"&&histRows===null){(async()=>{try{setHistRows(await sbAll("onboarding_history?select=*&order=completed_at.desc"));}catch(_e){setHistRows([]);}})();}},[view,histRows]);
+  useEffect(()=>{setZAll(null);setZAllOpen(false);},[detail]);
   async function load(){setLoading(true);try{
-    const [a,l,n,zc]=await Promise.all([
+    const [a,l,n,zc,oc,ok,op,oa,ocm]=await Promise.all([
       sb("GET","hubspot_companies?select=*&order=name"),
       sb("GET","integration_links?system=eq.hubspot&select=entity_type,local_id,external_id"),
       sb("GET","crm_notes?select=*&order=created_at.desc"),
       sb("GET","hubspot_contacts?select=*&order=last_name.asc.nullslast").catch(()=>[]),
+      sbAll("ob_campaigns?select=*").catch(()=>[]),
+      sbAll("ob_contracts?select=*").catch(()=>[]),
+      sbAll("ob_prospects?select=*").catch(()=>[]),
+      sbAll("ob_accounts?select=crm_id,name").catch(()=>[]),
+      sbAll("ob_campaign_matches?select=*").catch(()=>[]),
     ]);
-    setAccounts(a);setLinks(l);setNotes(n);setZContacts(zc);
+    setAccounts(a);setLinks(l);setNotes(n);setZContacts(zc);setObCamps(oc||[]);setObCons(ok||[]);setObPros(op||[]);setObAcctNames(oa||[]);setObMatches(ocm||[]);
   }catch(e){console.error(e);}setLoading(false);}
   useEffect(()=>{load();},[]);
   const linkByExt=React.useMemo(()=>{const m=new Map();links.forEach(l=>m.set(String(l.external_id),l));return m;},[links]);
@@ -12081,17 +14540,256 @@ function CRM({clients,publishers,clientCampaigns,publisherCampaigns,currentUser}
   const selS={background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,color:C.text,padding:"7px 10px",fontSize:12};
 
   if(loading)return <div style={{color:C.sub}}>Loading…</div>;
-  const viewToggle=<div style={{display:"flex",gap:8}}>{[["directory","Directory"],["status","Onboarding"]].map(([id,l])=>
-    <button key={id} onClick={()=>setView(id)} style={{background:view===id?C.accent:"transparent",border:`1px solid ${view===id?C.accent:C.border}`,borderRadius:6,color:view===id?C.accentFg:C.sub,padding:"6px 14px",fontSize:12,fontWeight:600,cursor:"pointer"}}>{l}</button>)}</div>;
-  if(view==="status")return <div>
-    <div style={{display:"flex",gap:16,alignItems:"center",marginBottom:14}}>
-      <h1 style={{fontSize:22,fontWeight:800,margin:0}}>CRM</h1>{viewToggle}
-    </div>
-    <AccountStatus clients={clients} publishers={publishers} clientCampaigns={clientCampaigns} publisherCampaigns={publisherCampaigns} currentUser={currentUser}/>
+  const tab=["accounts","offers","agreements","sales","onboarding","history","matching"].includes(view)?view:"accounts";
+  const viewToggle=<div style={{display:"flex",gap:8,flexWrap:"wrap"}}>{[["accounts","Accounts"],["offers","Offers & Campaigns"],["agreements","Agreements"],["matching","Supply & Demand"],["sales","Sales Pipeline"],["onboarding","Onboarding"],["history","Completed History"]].map(([id,l])=>
+    <button key={id} onClick={()=>setView(id)} style={{background:tab===id?C.accent:"transparent",border:`1px solid ${tab===id?C.accent:C.border}`,borderRadius:6,color:tab===id?C.accentFg:C.sub,padding:"6px 14px",fontSize:12,fontWeight:600,cursor:"pointer"}}>{l}</button>)}</div>;
+  const crmHead=<div style={{display:"flex",gap:16,alignItems:"center",marginBottom:14,flexWrap:"wrap"}}>
+    <h1 style={{fontSize:22,fontWeight:800,margin:0}}>CRM</h1>{viewToggle}
   </div>;
+  const obChip=v=>{const x=String(v||"");if(!x)return <span style={{color:C.dim,fontSize:11}}>—</span>;const col=x==="Active"||x==="Signed"||x==="Complete"||x.includes("Executed")?C.green:/Pending|Onboarding|Sent|Signature|Redlining|Ready|Draft|Awaiting|Intake/.test(x)?C.amber:/Blacklist|Ended|Expired|Terminated|Replaced|Collections/.test(x)?C.red:C.sub;
+    return <span style={{fontSize:10,fontWeight:700,color:col,border:`1px solid ${col}`,borderRadius:4,padding:"1px 6px",whiteSpace:"nowrap"}}>{x}</span>;};
+  const fmtDay=d=>d?new Date(String(d).slice(0,10)+"T12:00:00").toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}):"—";
+  const tdS={padding:"7px 8px",borderBottom:`1px solid ${C.border}`,fontSize:12,color:C.text,verticalAlign:"top"};
+  const thS={padding:"6px 8px",borderBottom:`2px solid ${C.border}`,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",color:C.sub,textAlign:"left",whiteSpace:"nowrap"};
+  const distinctOf=(rows,k)=>[...new Set(rows.map(r=>r[k]).filter(Boolean))].sort();
+  async function writeCrmRecord(recordType,crmId,changes){
+    const session=sessionStorage.getItem("nyala_session");
+    const tok=session?JSON.parse(session).access_token:null;
+    const r=await fetch(`${SUPABASE_URL}/functions/v1/onboarding-write`,{method:"POST",headers:{"Content-Type":"application/json",apikey:SUPABASE_ANON_KEY,Authorization:`Bearer ${tok}`},body:JSON.stringify({record_type:recordType,crm_id:crmId,changes})});
+    const j=await r.json();
+    if(!r.ok||!j.saved)throw new Error(j.error||`HTTP ${r.status}`);
+    return j;
+  }
+
+  if(tab==="matching")return <div>{crmHead}<SupplyDemand camps={obCamps} matches={obMatches} me={me} reload={load}/></div>;
+
+  if(tab==="onboarding")return <div>{crmHead}<OnboardingPage user={currentUser}/></div>;
+
+  if(tab==="history"){
+    const rows=(histRows||[]).filter(h=>{
+      if(hiKind!=="All"&&h.kind!==hiKind.toLowerCase())return false;
+      if(hiSide!=="All"&&(h.side||"")!==hiSide.toLowerCase())return false;
+      const q=hiQ.trim().toLowerCase();
+      if(q&&![h.account_name,h.campaign_name,h.side].some(v=>String(v||"").toLowerCase().includes(q)))return false;
+      return true;
+    });
+    async function reopenHist(h){
+      const note=prompt("Why reopen this onboarding work? (recorded; the completion facts stay in history)","needs follow-up");
+      if(note==null)return;
+      try{
+        const rt=h.kind==="account"?`account:${h.side}`:`${h.side}_campaign`;
+        const zid=h.kind==="account"?h.account_crm_id:h.campaign_crm_id;
+        const ex=await sb("GET",`ob_overrides?record_type=eq.${rt}&crm_id=eq.${zid}&field=eq.report_include&active=eq.true&select=id,value`);
+        for(const o of (ex||[]))await sb("PATCH",`ob_overrides?id=eq.${o.id}`,{active:false,removed_by:me,removed_at:new Date().toISOString()});
+        await sb("POST","ob_overrides",{record_type:rt,crm_id:zid,field:"report_include",value:"true",set_by:me,note:`reopened from history: ${note||""}`});
+        await sb("PATCH",`onboarding_history?id=eq.${h.id}`,{reopened_at:new Date().toISOString(),reopened_by:me});
+        setHistRows(rs=>rs.map(x=>x.id===h.id?{...x,reopened_at:new Date().toISOString(),reopened_by:me}:x));
+      }catch(e){alert(`Could not reopen: ${e?.message||e}`);}
+    }
+    return <div>
+      {crmHead}
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
+        <div style={{width:220}}><Input placeholder="Search history…" value={hiQ} onChange={e=>setHiQ(e.target.value)}/></div>
+        <select value={hiKind} onChange={e=>setHiKind(e.target.value)} style={selS}><option>All</option><option>Account</option><option>Campaign</option></select>
+        <select value={hiSide} onChange={e=>setHiSide(e.target.value)} style={selS}><option>All</option><option>Buyer</option><option>Publisher</option></select>
+        <span style={{fontSize:11,color:C.dim}}>{rows.length} completed record{rows.length===1?"":"s"}</span>
+      </div>
+      <div style={{fontSize:12,color:C.sub,marginBottom:12}}>Permanent record of completed onboarding: snapshots as they stood at completion, go-live evidence, and document flags. Reopening resurfaces the item on the active Onboarding report without erasing any completion facts. Times marked "first detected" come from the hourly sync, not a claimed launch time.</div>
+      <div style={{...card,overflowX:"auto"}}>
+        <table style={{borderCollapse:"collapse",width:"100%",minWidth:1050}}>
+          <thead><tr>{["","Completed","Kind","Account","Campaign","Side","First call","First detected live","Docs","Reopened",""].map(h=><th key={h} style={thS}>{h}</th>)}</tr></thead>
+          <tbody>
+          {histRows===null&&<tr><td style={{...tdS,color:C.dim}} colSpan={11}>Loading… (if this never loads, run the onboarding engine migration)</td></tr>}
+          {histRows!==null&&rows.length===0&&<tr><td style={{...tdS,color:C.dim}} colSpan={11}>No completed onboarding history yet — entries appear when the go-live engine verifies a launch.</td></tr>}
+          {rows.map(h=><React.Fragment key={h.id}>
+          <tr>
+            <td style={tdS}><button onClick={()=>setHiOpen(hiOpen===h.id?null:h.id)} style={{background:"none",border:"none",color:C.accent,cursor:"pointer",fontSize:11}}>{hiOpen===h.id?"▾":"▸"}</button></td>
+            <td style={{...tdS,whiteSpace:"nowrap"}}>{fmtDay(h.completed_at)}</td>
+            <td style={tdS}>{obChip(h.kind==="account"?"Account":"Campaign")}</td>
+            <td style={{...tdS,fontWeight:700}}>{h.account_name||"—"}</td>
+            <td style={tdS}>{h.campaign_name||"—"}</td>
+            <td style={tdS}>{h.side||"—"}</td>
+            <td style={{...tdS,whiteSpace:"nowrap"}}>{h.first_call_at?String(h.first_call_at).slice(0,16).replace("T"," "):"—"}</td>
+            <td style={{...tdS,whiteSpace:"nowrap"}}>{h.verified_live_at?String(h.verified_live_at).slice(0,16).replace("T"," "):"—"}</td>
+            <td style={tdS}>{h.doc_flags?(h.doc_flags.cleared_at?obChip("resolved"):<span title={h.doc_flags.classification}>{obChip(h.doc_flags.classification||"flagged")}</span>):obChip("verified")}</td>
+            <td style={{...tdS,fontSize:11,color:C.sub}}>{h.reopened_at?`${fmtDay(h.reopened_at)} by ${h.reopened_by||"—"}`:"—"}</td>
+            <td style={tdS}>
+              {h.campaign_crm_id&&crmUrl(h.side==="buyer"?"buyer_offer":"publisher_campaign",h.campaign_crm_id)&&<a href={crmUrl(h.side==="buyer"?"buyer_offer":"publisher_campaign",h.campaign_crm_id)} target="_blank" rel="noreferrer" style={{fontSize:10,color:C.teal,marginRight:8}}>HubSpot ↗</a>}
+              {!h.reopened_at&&<button onClick={()=>reopenHist(h)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:4,color:C.sub,cursor:"pointer",fontSize:10,padding:"2px 8px"}}>Reopen</button>}
+            </td>
+          </tr>
+          {hiOpen===h.id&&<tr><td colSpan={11} style={{padding:"8px 16px 12px 36px",borderBottom:`1px solid ${C.border}`,background:"rgba(255,255,255,0.02)"}}>
+            <div style={{fontSize:10,fontWeight:700,color:C.sub,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:6}}>Snapshot at completion</div>
+            <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:11.5}}>
+              {Object.entries(h.snapshot||{}).filter(([k,v])=>v!=null&&v!==""&&!["raw","synced_at","activity_at"].includes(k)).slice(0,24).map(([k,v])=><span key={k}><span style={{color:C.sub}}>{k}:</span> <b>{String(v).slice(0,48)}</b></span>)}
+            </div>
+            {Array.isArray(h.contracts)&&h.contracts.length>0&&<div style={{marginTop:8}}>
+              <div style={{fontSize:10,fontWeight:700,color:C.sub,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:4}}>Agreements at completion</div>
+              {h.contracts.map((k,i)=><div key={i} style={{fontSize:11.5,marginBottom:2}}>{obChip(k.status||"—")} {k.name} {k.link&&<a href={k.link} target="_blank" rel="noreferrer" style={{color:C.teal,fontSize:10}}>doc ↗</a>}</div>)}
+            </div>}
+            {h.doc_flags&&!h.doc_flags.cleared_at&&<div style={{marginTop:8,fontSize:11.5,color:C.red}}>Unresolved: {h.doc_flags.classification} — clears automatically when executed documents are matched in Contracts & Agreements.</div>}
+          </td></tr>}
+          </React.Fragment>)}
+          </tbody>
+        </table>
+      </div>
+    </div>;
+  }
+
+  if(tab==="sales"){
+    return <div>{crmHead}<SalesPipelineV2 pros={obPros} acctNames={obAcctNames} contracts={obCons} me={me}/></div>;
+  }
+
+  if(tab==="offers"){
+    const rows=obCamps.filter(c=>{
+      if(ocSide!=="All"&&c.side!==ocSide.toLowerCase())return false;
+      if(ocOffer!=="All"&&(c.offer_status||"—")!==ocOffer)return false;
+      if(ocCamp!=="All"&&(c.campaign_status||"—")!==ocCamp)return false;
+      if(ocOwner!=="All"&&(c.follow_up_owner||c.owner_name||"—")!==ocOwner)return false;
+      const q=ocQ.trim().toLowerCase();
+      if(q&&![c.account_name,c.name,c.callgrid_campaign,c.endpoint_name,c.vertical].some(v=>String(v||"").toLowerCase().includes(q)))return false;
+      return true;
+    }).sort((x,y)=>String(x.account_name||"").localeCompare(String(y.account_name||""))||String(x.name||"").localeCompare(String(y.name||"")));
+    const shown=ocAll?rows:rows.slice(0,50);
+    const mismCount=rows.filter(c=>(c.io_rate!=null&&c.rate!=null&&Number(c.io_rate)!==Number(c.rate))||(c.io_duration!=null&&c.billable_duration!=null&&Number(c.io_duration)!==Number(c.billable_duration))).length;
+    return <div>
+      {crmHead}
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
+        <div style={{width:220}}><Input placeholder="Search account / campaign…" value={ocQ} onChange={e=>setOcQ(e.target.value)}/></div>
+        <select value={ocSide} onChange={e=>setOcSide(e.target.value)} style={selS}><option>All</option><option>Buyer</option><option>Publisher</option></select>
+        <select value={ocOffer} onChange={e=>setOcOffer(e.target.value)} style={selS}><option>All</option>{distinctOf(obCamps,"offer_status").map(v=><option key={v}>{v}</option>)}</select>
+        <select value={ocCamp} onChange={e=>setOcCamp(e.target.value)} style={selS}><option>All</option>{distinctOf(obCamps,"campaign_status").map(v=><option key={v}>{v}</option>)}</select>
+        <select value={ocOwner} onChange={e=>setOcOwner(e.target.value)} style={selS}><option>All</option>{[...new Set(obCamps.map(c=>c.follow_up_owner||c.owner_name).filter(Boolean))].sort().map(v=><option key={v}>{v}</option>)}</select>
+      </div>
+      <div style={{display:"flex",gap:12,marginBottom:14,flexWrap:"wrap"}}>
+        <div style={{...card,flex:1,minWidth:140}}><div style={{fontSize:11,color:C.sub}}>OFFERS & CAMPAIGNS</div><div style={{fontSize:22,fontWeight:800,marginTop:6}}>{obCamps.length}</div></div>
+        <div style={{...card,flex:1,minWidth:140}}><div style={{fontSize:11,color:C.sub}}>BUYER</div><div style={{fontSize:22,fontWeight:800,color:C.teal,marginTop:6}}>{obCamps.filter(c=>c.side==="buyer").length}</div></div>
+        <div style={{...card,flex:1,minWidth:140}}><div style={{fontSize:11,color:C.sub}}>PUBLISHER</div><div style={{fontSize:22,fontWeight:800,color:C.purple,marginTop:6}}>{obCamps.filter(c=>c.side==="publisher").length}</div></div>
+        <div style={{...card,flex:1,minWidth:140}}><div style={{fontSize:11,color:C.sub}}>IO ≠ LIVE (shown)</div><div style={{fontSize:22,fontWeight:800,color:mismCount?C.amber:C.green,marginTop:6}}>{mismCount}</div></div>
+        <div style={{...card,flex:1,minWidth:140}}><div style={{fontSize:11,color:C.sub}}>SHOWING</div><div style={{fontSize:22,fontWeight:800,marginTop:6}}>{shown.length}{rows.length>shown.length?` / ${rows.length}`:""}</div></div>
+      </div>
+      <div style={{...card,overflowX:"auto"}}>
+        <table style={{borderCollapse:"collapse",width:"100%",minWidth:1100}}>
+          <thead><tr><th style={thS}></th><th style={thS}>Account</th><th style={thS}>Offer / campaign</th><th style={thS}>Side</th><th style={thS}>Offer status</th><th style={thS}>Campaign status</th><th style={thS}>IO</th><th style={thS}>Rate</th><th style={thS}>Terms</th><th style={thS}>Owner</th></tr></thead>
+          <tbody>
+          {shown.length===0&&<tr><td style={{...tdS,color:C.dim}} colSpan={10}>Nothing matches.</td></tr>}
+          {shown.map(c=>{const id=c.crm_id;const rateBad=c.io_rate!=null&&c.rate!=null&&Number(c.io_rate)!==Number(c.rate);return <React.Fragment key={id}>
+          <tr>
+            <td style={tdS}><button onClick={()=>setOcOpen(ocOpen===id?null:id)} style={{background:"none",border:"none",color:C.accent,cursor:"pointer",fontSize:11}}>{ocOpen===id?"▾":"▸"}</button></td>
+            <td style={{...tdS,fontWeight:700}}>{c.account_name||"—"}</td>
+            <td style={tdS}>{c.name}<div style={{fontSize:10,color:C.dim}}>{c.callgrid_campaign||""}</div></td>
+            <td style={tdS}>{c.side==="buyer"?<span style={{color:C.teal,fontSize:11,fontWeight:700}}>Buyer</span>:<span style={{color:C.purple,fontSize:11,fontWeight:700}}>Publisher</span>}</td>
+            <td style={tdS}>{obChip(c.offer_status)}</td>
+            <td style={tdS}>{obChip(c.campaign_status)}</td>
+            <td style={tdS}>{obChip(c.io_status)}{c.io_date_signed&&<span style={{fontSize:11,color:C.sub}}> {fmtDay(c.io_date_signed)}</span>}{c.io_workdrive_link&&<a href={c.io_workdrive_link} target="_blank" rel="noreferrer" style={{color:C.accent,fontSize:11,marginLeft:4}}>📄</a>}</td>
+            <td style={{...tdS,...mono,color:rateBad?C.amber:C.text}}>{c.rate!=null?`$${c.rate}`:c.io_rate!=null?`$${c.io_rate} (IO)`:"—"}{rateBad?" ⚠":""}</td>
+            <td style={{...tdS,fontSize:11,color:C.sub}}>{c.payment_terms||c.synced_payment_terms||c.io_payment_terms||"—"}</td>
+            <td style={{...tdS,fontSize:11}}>{c.follow_up_owner||c.owner_name||"—"}</td>
+          </tr>
+          {ocOpen===id&&<tr><td style={{padding:"10px 16px 14px 34px",borderBottom:`1px solid ${C.border}`,background:"rgba(255,255,255,0.02)"}} colSpan={10}>
+            <IoCompareGrid c={c}/>
+            <div style={{display:"flex",gap:16,flexWrap:"wrap",marginTop:10,fontSize:11,color:C.sub}}>
+              {c.side==="buyer"&&c.buyer_cpa_goal&&<span style={{color:C.teal,fontWeight:700}}>CPA Goal: {c.buyer_cpa_goal}</span>}
+              {c.vertical&&<span>Vertical: {c.vertical}</span>}
+              {c.lead_type&&<span>Lead type: {c.lead_type}</span>}
+              {c.traffic_type&&<span>Traffic: {c.traffic_type}</span>}
+              {c.endpoint_name&&<span>{c.side==="buyer"?"Destination":"Source"}: {c.endpoint_name}</span>}
+              {c.io_states&&<span>IO states: {String(c.io_states).slice(0,120)}</span>}
+              {c.next_action&&<span>Next action: {c.next_action}</span>}
+              {c.follow_up_date&&<span style={{color:C.amber}}>Follow up {fmtDay(c.follow_up_date)}</span>}
+            </div>
+            {c.campaign_notes&&<div style={{marginTop:8,fontSize:11,color:C.sub,maxWidth:640}}>Notes: {c.campaign_notes}</div>}
+          </td></tr>}
+          </React.Fragment>;})}
+          </tbody>
+        </table>
+        {rows.length>50&&!ocAll&&<div style={{marginTop:10}}><button onClick={()=>setOcAll(true)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.accent,cursor:"pointer",fontSize:12,padding:"6px 14px"}}>Show all {rows.length}</button></div>}
+      </div>
+    </div>;
+  }
+
+  if(tab==="agreements"){
+    const unmatched=k=>["IO","Email IO","MSA + IO"].includes(k.document_type)&&!k.buyer_campaign_crm_id&&!k.publisher_campaign_crm_id&&!k.dashboard_campaign_id;
+    const rows=obCons.filter(k=>{
+      if(agType!=="All"&&(k.document_type||"—")!==agType)return false;
+      if(agStatus!=="All"&&(k.status||"—")!==agStatus)return false;
+      if(agSide!=="All"&&!String(k.partner_side||"").toLowerCase().includes(agSide.toLowerCase()))return false;
+      if(agMatch==="Needs matching"&&!unmatched(k))return false;
+      const q=agQ.trim().toLowerCase();
+      if(q&&![k.name,k.account_name,k.campaign_name,k.document_type].some(v=>String(v||"").toLowerCase().includes(q)))return false;
+      return true;
+    }).sort((x,y)=>String(y.signed_date||y.created_time||"").localeCompare(String(x.signed_date||x.created_time||"")));
+    const shown=agAll?rows:rows.slice(0,50);
+    const needsN=obCons.filter(unmatched).length;
+    return <div>
+      {crmHead}
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
+        <div style={{width:220}}><Input placeholder="Search document / account…" value={agQ} onChange={e=>setAgQ(e.target.value)}/></div>
+        <select value={agType} onChange={e=>setAgType(e.target.value)} style={selS}><option>All</option>{distinctOf(obCons,"document_type").map(v=><option key={v}>{v}</option>)}</select>
+        <select value={agStatus} onChange={e=>setAgStatus(e.target.value)} style={selS}><option>All</option>{distinctOf(obCons,"status").map(v=><option key={v}>{v}</option>)}</select>
+        <select value={agSide} onChange={e=>setAgSide(e.target.value)} style={selS}><option>All</option><option>Buyer</option><option>Publisher</option></select>
+        <select value={agMatch} onChange={e=>setAgMatch(e.target.value)} style={selS}><option>All</option><option>Needs matching</option></select>
+      </div>
+      <div style={{display:"flex",gap:12,marginBottom:14,flexWrap:"wrap"}}>
+        <div style={{...card,flex:1,minWidth:140}}><div style={{fontSize:11,color:C.sub}}>AGREEMENTS</div><div style={{fontSize:22,fontWeight:800,marginTop:6}}>{obCons.length}</div></div>
+        <div style={{...card,flex:1,minWidth:140}}><div style={{fontSize:11,color:C.sub}}>SIGNED</div><div style={{fontSize:22,fontWeight:800,color:C.green,marginTop:6}}>{obCons.filter(k=>k.status==="Signed").length}</div></div>
+        <div style={{...card,flex:1,minWidth:140}}><div style={{fontSize:11,color:C.sub}}>NEEDS MATCHING</div><div style={{fontSize:22,fontWeight:800,color:needsN?C.amber:C.green,marginTop:6}}>{needsN}</div></div>
+        <div style={{...card,flex:1,minWidth:140}}><div style={{fontSize:11,color:C.sub}}>SHOWING</div><div style={{fontSize:22,fontWeight:800,marginTop:6}}>{shown.length}{rows.length>shown.length?` / ${rows.length}`:""}</div></div>
+      </div>
+      <div style={{...card,overflowX:"auto"}}>
+        <table style={{borderCollapse:"collapse",width:"100%",minWidth:1000}}>
+          <thead><tr><th style={thS}>Document</th><th style={thS}>Type</th><th style={thS}>Status</th><th style={thS}>Side</th><th style={thS}>Account</th><th style={thS}>Campaign</th><th style={thS}>Signed</th><th style={thS}>Files</th><th style={thS}></th></tr></thead>
+          <tbody>
+          {shown.length===0&&<tr><td style={{...tdS,color:C.dim}} colSpan={9}>Nothing matches.</td></tr>}
+          {shown.map(k=>{const id=k.crm_id;const um=unmatched(k);return <React.Fragment key={id}>
+          <tr>
+            <td style={{...tdS,fontWeight:600,maxWidth:260}}>{k.name||"—"}</td>
+            <td style={tdS}>{obChip(k.document_type)}</td>
+            <td style={tdS}>{obChip(k.status)}</td>
+            <td style={{...tdS,fontSize:11,color:C.sub}}>{k.partner_side||"—"}</td>
+            <td style={tdS}>{k.account_name||"—"}</td>
+            <td style={{...tdS,fontSize:11}}>{k.campaign_name||(um?<span style={{color:C.amber}}>unmatched</span>:"—")}</td>
+            <td style={{...tdS,fontSize:11,color:C.sub}}>{fmtDay(k.signed_date)}</td>
+            <td style={tdS}>{k.workdrive_file_link&&<a href={k.workdrive_file_link} target="_blank" rel="noreferrer" style={{color:C.accent,fontSize:11,marginRight:6}}>📄 Document</a>}{k.signed_pdf_link&&<a href={k.signed_pdf_link} target="_blank" rel="noreferrer" style={{color:C.accent,fontSize:11}}>PDF</a>}</td>
+            <td style={tdS}>{um&&<button onClick={()=>{setAgOpen(agOpen===id?null:id);setMatchSide(String(k.partner_side||"").toLowerCase().includes("pub")?"publisher":"buyer");setMatchQ("");setMatchSel("");}} style={{background:"none",border:`1px solid ${C.amber}`,borderRadius:4,color:C.amber,cursor:"pointer",fontSize:11,padding:"2px 8px"}}>{agOpen===id?"close":"Match…"}</button>}</td>
+          </tr>
+          {agOpen===id&&(()=>{
+            const cands=obCamps.filter(c=>c.side===matchSide&&(!k.account_crm_id||c.account_crm_id===k.account_crm_id||matchQ.trim()))
+              .filter(c=>{const q=matchQ.trim().toLowerCase();return !q||[c.account_name,c.name].some(v=>String(v||"").toLowerCase().includes(q));})
+              .sort((x,y)=>String(x.account_name||"").localeCompare(String(y.account_name||"")))
+              .slice(0,100);
+            return <tr><td style={{padding:"10px 16px 14px 16px",borderBottom:`1px solid ${C.border}`,background:"rgba(255,255,255,0.02)"}} colSpan={9}>
+              <div style={{fontSize:11,color:C.sub,marginBottom:8}}>Link this document to the offer it belongs to (saved to HubSpot). {k.account_crm_id?"Showing this account's campaigns first — type to search all.":"No account on the document — search by name."}</div>
+              <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                <select value={matchSide} onChange={e=>{setMatchSide(e.target.value);setMatchSel("");}} style={selS}><option value="buyer">Buyer offer</option><option value="publisher">Publisher campaign</option></select>
+                <input value={matchQ} onChange={e=>{setMatchQ(e.target.value);setMatchSel("");}} placeholder="Filter campaigns…" style={{...selS,width:180}}/>
+                <select value={matchSel} onChange={e=>setMatchSel(e.target.value)} style={{...selS,maxWidth:360}}>
+                  <option value="">— pick a campaign —</option>
+                  {cands.map(c=><option key={c.crm_id} value={c.crm_id}>{(c.account_name||"?")+" · "+(c.name||c.crm_id)}</option>)}
+                </select>
+                <Btn disabled={!matchSel||matchBusy} onClick={async()=>{
+                  setMatchBusy(true);
+                  try{
+                    const field=matchSide==="buyer"?"buyer_campaign_crm_id":"publisher_campaign_crm_id";
+                    await writeCrmRecord("contract",id,{[field]:matchSel});
+                    const camp=obCamps.find(c=>c.crm_id===matchSel);
+                    setObCons(rs=>rs.map(r=>r.crm_id===id?{...r,[field]:matchSel,campaign_name:camp?.name||r.campaign_name}:r));
+                    setAgOpen(null);
+                  }catch(e){alert(`Could not match: ${e?.message||e}`);}
+                  setMatchBusy(false);
+                }} style={{fontSize:12,padding:"6px 14px"}}>{matchBusy?"Saving…":"Save match"}</Btn>
+              </div>
+            </td></tr>;})()}
+          </React.Fragment>;})}
+          </tbody>
+        </table>
+        {rows.length>50&&!agAll&&<div style={{marginTop:10}}><button onClick={()=>setAgAll(true)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.accent,cursor:"pointer",fontSize:12,padding:"6px 14px"}}>Show all {rows.length}</button></div>}
+      </div>
+    </div>;
+  }
   return <div>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,flexWrap:"wrap",gap:10}}>
-      <div style={{display:"flex",gap:16,alignItems:"center"}}><h1 style={{fontSize:22,fontWeight:800,margin:0}}>CRM <span style={{fontSize:12,fontWeight:500,color:C.sub}}>— HubSpot companies, mirrored</span></h1>{viewToggle}</div>
+      <div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap"}}><h1 style={{fontSize:22,fontWeight:800,margin:0}}>CRM</h1>{viewToggle}</div>
       <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
         <div style={{width:220}}><Input placeholder="Search accounts…" value={search} onChange={e=>setSearch(e.target.value)}/></div>
         <select value={fType} onChange={e=>setFType(e.target.value)} style={selS}><option>All</option>{distinct("partner_type").map(v=><option key={v}>{v}</option>)}</select>
@@ -12149,6 +14847,65 @@ function CRM({clients,publishers,clientCampaigns,publisherCampaigns,currentUser}
           {kvRow("Pub payment terms",a.publisher_payment_terms)}
           {kvRow("Payment method",a.payment_method)}
           {kvRow("HubSpot last modified",a.modified_time?String(a.modified_time).slice(0,16).replace("T"," "):null)}
+          {(()=>{const zc2=obCamps.filter(c=>String(c.account_crm_id||"")===String(a.external_id));
+            return zc2.length?<div>
+              <div style={{fontSize:10,fontWeight:800,color:C.sub,letterSpacing:"0.05em",margin:"12px 0 4px"}}>OFFERS & CAMPAIGNS (HUBSPOT)</div>
+              {zc2.map(c=><div key={c.crm_id} style={{display:"flex",justifyContent:"space-between",gap:8,fontSize:11.5,padding:"3px 0",borderBottom:`1px solid ${C.border}`}}>
+                <span>{c.side==="buyer"?"B":"P"} · {c.name}</span>
+                <span style={{color:C.sub,whiteSpace:"nowrap"}}>{c.offer_status||c.campaign_status||"—"}{c.rate!=null?` · $${c.rate}`:""}</span>
+              </div>)}
+            </div>:null;})()}
+          {(()=>{const zk=obCons.filter(k=>String(k.account_crm_id||"")===String(a.external_id));
+            return zk.length?<div>
+              <div style={{fontSize:10,fontWeight:800,color:C.sub,letterSpacing:"0.05em",margin:"12px 0 4px"}}>AGREEMENTS (HUBSPOT)</div>
+              {zk.map(k=><div key={k.crm_id} style={{display:"flex",justifyContent:"space-between",gap:8,fontSize:11.5,padding:"3px 0",borderBottom:`1px solid ${C.border}`}}>
+                <span>{k.document_type||"Doc"} · {k.name||""}</span>
+                <span style={{color:C.sub,whiteSpace:"nowrap"}}>{k.status||"—"}{k.signed_date?` · ${String(k.signed_date).slice(0,10)}`:""}{k.workdrive_file_link?<a href={k.workdrive_file_link} target="_blank" rel="noreferrer" style={{color:C.teal,marginLeft:6}}>📄</a>:null}</span>
+              </div>)}
+            </div>:null;})()}
+          <div style={{margin:"14px 0 4px"}}>
+            <button onClick={async()=>{
+              if(!zAllOpen&&zAll===null){
+                try{
+                  const [ra,me2]=await Promise.all([
+                    sb("GET",`ob_accounts?crm_id=eq.${a.external_id}&select=raw`),
+                    zMeta?Promise.resolve(zMeta):sb("GET","ob_field_meta?module=eq.Accounts&select=api_name,label,data_type&limit=500"),
+                  ]);
+                  if(!zMeta)setZMeta(me2||[]);
+                  setZAll(ra?.[0]?.raw||false);
+                }catch(_e){setZAll(false);}
+              }
+              setZAllOpen(!zAllOpen);
+            }} style={{background:"none",border:"none",color:C.accent,cursor:"pointer",fontSize:10,fontWeight:800,letterSpacing:"0.05em",padding:0}}>
+              {zAllOpen?"▾":"▸"} ALL HUBSPOT PROPERTIES
+            </button>
+            {zAllOpen&&(zAll===null?<div style={{fontSize:11,color:C.sub,marginTop:4}}>Loading…</div>
+              :zAll===false?<div style={{fontSize:11,color:C.dim,marginTop:4}}>Full record not synced yet — it appears after the next HubSpot sync.</div>
+              :(()=>{
+                const metaBy=new Map((zMeta||[]).map(m=>[m.api_name,m]));
+                const rv=(v,dt)=>{
+                  if(v==null||v==="")return null;
+                  if(Array.isArray(v))return v.map(x=>typeof x==="object"?(x?.name||x?.id||""):String(x)).filter(Boolean).join(", ")||null;
+                  if(typeof v==="object")return v.name||v.id||null;
+                  if(typeof v==="boolean")return v?"Yes":"No";
+                  if(dt==="datetime"||/^\d{4}-\d{2}-\d{2}T/.test(String(v)))return String(v).slice(0,16).replace("T"," ");
+                  if(dt==="website"||/^https?:\/\//.test(String(v)))return <a href={String(v)} target="_blank" rel="noreferrer" style={{color:C.teal}}>{String(v).slice(0,54)}</a>;
+                  return String(v).slice(0,160);
+                };
+                const ents=Object.entries(zAll)
+                  .filter(([k,v])=>!k.startsWith("$")&&k!=="id"&&v!=null&&v!==""&&!(Array.isArray(v)&&v.length===0))
+                  .map(([k,v])=>({k,label:metaBy.get(k)?.label||k.replace(/_/g," "),val:rv(v,metaBy.get(k)?.data_type)}))
+                  .filter(e=>e.val!=null)
+                  .sort((x,y)=>String(x.label).localeCompare(String(y.label)));
+                return <div style={{marginTop:6}}>
+                  {ents.map(e=><div key={e.k} style={{display:"flex",gap:8,padding:"3px 0",borderBottom:`1px solid ${C.border}22`}}>
+                    <span style={{fontSize:11,color:C.sub,minWidth:170}}>{e.label}</span>
+                    <span style={{fontSize:11.5,color:C.text}}>{e.val}</span>
+                  </div>)}
+                  <div style={{fontSize:10,color:C.dim,marginTop:6}}>Every populated HubSpot field, custom fields included, labels from HubSpot's own schema. Blank fields are hidden; a field filled or cleared in HubSpot updates here after the next sync, no code change needed.</div>
+                </div>;
+              })())}
+          </div>
         </div>
         <div style={{flex:"1 1 300px"}}>
           <div style={{fontSize:10,fontWeight:800,color:C.sub,letterSpacing:"0.05em",marginBottom:6}}>CONTACTS</div>
@@ -13548,6 +16305,20 @@ function HRPortal({user,isAdmin}) {
 // write to integration_log but aren't external connections, so no tile.
 const INTERNAL_LOG_SYSTEMS=["alerts","dispo"];
 function Integrations({onRefresh}) {
+  const [hsSetup,setHsSetup]=useState(null);   // last hubspot-setup result
+  const [hsSetupBusy,setHsSetupBusy]=useState(false);
+  async function runHubspotSetup(dry){
+    setHsSetupBusy(true);
+    try{
+      const session=sessionStorage.getItem("nyala_session");
+      const tok=session?JSON.parse(session).access_token:null;
+      const r=await fetch(`${SUPABASE_URL}/functions/v1/hubspot-setup`,{method:"POST",headers:{"Content-Type":"application/json",apikey:SUPABASE_ANON_KEY,Authorization:`Bearer ${tok}`},body:JSON.stringify({dry_run:!!dry})});
+      const j=await r.json();
+      if(!r.ok)throw new Error(j.error||`HTTP ${r.status}`);
+      setHsSetup(j);
+    }catch(e){setHsSetup({error:String(e?.message||e)});}
+    setHsSetupBusy(false);
+  }
   const [systems,setSystems]=useState([]);
   const [log,setLog]=useState([]);
   const [links,setLinks]=useState([]);
@@ -13580,6 +16351,18 @@ function Integrations({onRefresh}) {
     }catch(e){alert(e.message);}
     setZbusy(false);
   }
+  const [zpick2,setZpick2]=useState({});
+  async function linkCrmSecond(acct){
+    const sel=zpick2[acct.id];
+    if(!sel)return;
+    const [type,localId]=sel.split("|");
+    setZlinking(acct.id);
+    try{
+      await sb("POST","integration_links",{entity_type:type,local_id:localId,system:"hubspot",external_id:acct.id,external_label:acct.name});
+      await runCrmSync();
+    }catch(e){alert(e.message);}
+    setZlinking(null);
+  }
   async function linkCrm(acct){
     const sel=zpick[acct.id];
     if(!sel)return;
@@ -13607,7 +16390,8 @@ function Integrations({onRefresh}) {
   const openErrors=log.filter(r=>r.status==="error"&&!r.resolved);
   function healthOf(s){
     if(!s.enabled)return {dot:"⚪",label:"Not connected",color:C.dim};
-    const hasOpenError=openErrors.some(e=>e.system===s.id);
+    // an open failure only counts if nothing has succeeded since (it stays listed below until dismissed)
+    const hasOpenError=openErrors.some(e=>e.system===s.id&&(!s.last_ok_at||new Date(e.created_at)>new Date(s.last_ok_at)));
     if(hasOpenError||( s.last_error_at&&(!s.last_ok_at||s.last_error_at>s.last_ok_at)))return {dot:"🔴",label:"Error",color:C.red};
     if(!s.last_ok_at)return {dot:"🟡",label:"No syncs yet",color:C.amber};
     const ageMin=(Date.now()-new Date(s.last_ok_at).getTime())/60000;
@@ -13654,6 +16438,21 @@ function Integrations({onRefresh}) {
         <Btn small outline color={C.sub} onClick={()=>dismissError(e)}>Dismiss</Btn>
       </div>)}
     </div>}
+    {FEATURES.hubspot&&<div style={{...card,marginBottom:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,gap:8,flexWrap:"wrap"}}>
+        <div style={{fontSize:13,fontWeight:700}}>HubSpot Setup <span style={{fontSize:11.5,fontWeight:500,color:C.sub}}>admin only · adds Nyala's objects and properties to HubSpot; never edits or deletes anything</span></div>
+        <div style={{display:"flex",gap:8}}>
+          <Btn small outline color={C.sub} onClick={()=>runHubspotSetup(true)} disabled={hsSetupBusy}>Preview</Btn>
+          <Btn small color={C.teal} onClick={()=>{if(confirm("Create Nyala's custom objects and properties in HubSpot? This only adds what's missing."))runHubspotSetup(false);}} disabled={hsSetupBusy}>{hsSetupBusy?"Working…":"Set up HubSpot"}</Btn>
+        </div>
+      </div>
+      {!hsSetup&&<div style={{fontSize:12.5,color:C.sub}}>Creates the Buyer Offer, Publisher Campaign, Agreement, Campaign Match, Agreement Campaign Link and DID objects, plus the company properties the dashboard uses. Safe to re-run.</div>}
+      {hsSetup?.error&&<div style={{fontSize:12.5,color:C.red}}>✗ {hsSetup.error}</div>}
+      {hsSetup&&!hsSetup.error&&<div style={{fontSize:12.5,color:hsSetup.complete?C.green:C.text}}>
+        {hsSetup.complete?"✓ HubSpot is fully set up. Nothing to add.":hsSetup.dry_run?`Preview: ${hsSetup.changes.length} change${hsSetup.changes.length===1?"":"s"} would be made.`:`✓ Done: ${hsSetup.changes.length} change${hsSetup.changes.length===1?"":"s"} made in HubSpot.`}
+        {!hsSetup.complete&&<div style={{maxHeight:180,overflowY:"auto",fontSize:11.5,color:C.sub,marginTop:6}}>{hsSetup.changes.map((c,i)=><div key={i}>• {c}</div>)}</div>}
+      </div>}
+    </div>}
     {FEATURES.hubspot&&systems.find(s=>s.id==="hubspot")?.enabled&&<div style={{...card,marginBottom:16}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
         <div style={{fontSize:13,fontWeight:700}}>HubSpot Company Matching</div>
@@ -13661,7 +16460,10 @@ function Integrations({onRefresh}) {
       </div>
       {!zres&&<div style={{fontSize:12.5,color:C.sub}}>Run the account sync to pull HubSpot companies, auto-link the unambiguous name matches, and list the rest here for manual linking.</div>}
       {zres&&<>
-        <div style={{fontSize:12.5,color:C.sub,marginBottom:12}}>{zres.crm_accounts} HubSpot companies · <span style={{color:C.green,fontWeight:600}}>{zres.matched} linked</span>{zres.new_links>0&&<span> ({zres.new_links} new this run)</span>} · {(zres.unmatched_crm||[]).length} awaiting manual link</div>
+        <div style={{fontSize:12.5,color:C.sub,marginBottom:12}}>{zres.crm_accounts} HubSpot companies · <span style={{color:C.green,fontWeight:600}}>{zres.matched} linked</span>{zres.new_links>0&&<span> ({zres.new_links} new this run)</span>} · {(zres.unmatched_crm||[]).length} awaiting manual link
+          {zres.buyer_offers!=null&&<div style={{marginTop:4}}>{zres.buyer_offers} buyer offers · {zres.dids} DIDs{zres.dids_skipped_bad_number?<span style={{color:C.amber}}> ({zres.dids_skipped_bad_number} skipped: not a 10-digit number)</span>:null} · {zres.agreements} agreements{(zres.created_campaigns||[]).length?<span style={{color:C.green}}> · new dashboard campaigns: {zres.created_campaigns.join(", ")}</span>:null}{zres.attribution&&zres.attribution!=="unchanged"?<span> · calls re-attributed ({zres.attribution.attributed} matched to buyers, {zres.attribution.unattributed} without a DID)</span>:null}</div>}
+          {(zres.missing_objects||[]).length>0&&<div style={{marginTop:4,color:C.amber}}>Not set up in HubSpot yet: {zres.missing_objects.join(", ")}. Use Set up HubSpot above.</div>}
+        </div>
         {(zres.unmatched_crm||[]).length>0&&<div style={{maxHeight:340,overflowY:"auto"}}>
           {(zres.unmatched_crm||[]).map(a=><div key={a.id} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 0",borderBottom:`1px solid ${C.border}`}}>
             <span style={{fontSize:12.5,fontWeight:600,flex:"1 1 220px"}}>{a.name}</span>
@@ -13673,6 +16475,27 @@ function Integrations({onRefresh}) {
           </div>)}
         </div>}
         {(zres.unmatched_local||[]).length>0&&<div style={{fontSize:11.5,color:C.dim,marginTop:10}}>Dashboard records with no HubSpot company: {(zres.unmatched_local||[]).map(l=>l.name).join(", ")}</div>}
+        {(()=>{
+          // dual-role partners: a HubSpot company linked as one side can also
+          // link to the other side (pub that is also a client)
+          const oppOpts=t=>(zres.unmatched_local||[]).filter(l=>l.type===(t==="client"?"publisher":"client"));
+          const rows=(zres.single_linked||[]).filter(a=>oppOpts(a.linked_type).length>0);
+          if(!rows.length)return null;
+          return <div style={{marginTop:16,borderTop:`1px solid ${C.border}`,paddingTop:12}}>
+            <div style={{fontSize:12,fontWeight:700,color:C.text,marginBottom:2}}>Dual-role partners — add the second link</div>
+            <div style={{fontSize:11.5,color:C.dim,marginBottom:8}}>These HubSpot companies are linked on one side only. If the partner is both a publisher and a client, pick their record on the other side to link the same account to both.</div>
+            <div style={{maxHeight:260,overflowY:"auto"}}>
+              {rows.map(a=><div key={a.id} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 0",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap"}}>
+                <span style={{fontSize:12.5,fontWeight:600,flex:"1 1 200px"}}>{a.name}</span>
+                <span style={{fontSize:10,fontWeight:700,color:a.linked_type==="client"?C.teal:C.purple,border:`1px solid ${C.border}`,borderRadius:4,padding:"1px 6px"}}>LINKED AS {a.linked_type==="client"?"CLIENT":"PUBLISHER"}</span>
+                <select value={zpick2[a.id]||""} onChange={e=>setZpick2({...zpick2,[a.id]:e.target.value})} style={{flex:"1 1 220px",background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,color:C.text,padding:"6px 8px",fontSize:12}}>
+                  <option value="">— also link as {a.linked_type==="client"?"publisher":"client"}… —</option>
+                  {oppOpts(a.linked_type).map(l=><option key={`${l.type}|${l.id}`} value={`${l.type}|${l.id}`}>{l.type==="client"?"Client":"Publisher"}: {l.name}</option>)}
+                </select>
+                <Btn small onClick={()=>linkCrmSecond(a)} disabled={!zpick2[a.id]||zlinking===a.id}>{zlinking===a.id?"Linking…":"Link"}</Btn>
+              </div>)}
+            </div>
+          </div>;})()}
       </>}
     </div>}
     {FEATURES.ioIntake&&<div style={{...card,marginBottom:16}}>
@@ -13680,7 +16503,7 @@ function Integrations({onRefresh}) {
         <div style={{fontSize:13,fontWeight:700}}>IO Automation <span style={{fontWeight:500,color:C.sub}}>— signed IOs → CallGrid campaigns</span></div>
         <Btn onClick={runIoIntake} disabled={ioBusy} color={C.purple}>{ioBusy?"Checking…":"↻ Check for new IOs"}</Btn>
       </div>
-      <div style={{fontSize:11.5,color:C.dim,marginBottom:10}}>Runs automatically every 15 minutes. When a buyer IO completes in Zoho Sign, its payout, terms, states and caps are read off the signed document and matched against CallGrid. Existing campaigns are recognized; anything new is flagged READY FOR SETUP for the team to build in CallGrid by hand — the dashboard never writes to CallGrid.</div>
+      <div style={{fontSize:11.5,color:C.dim,marginBottom:10}}>Runs automatically every 15 minutes. When a buyer IO completes in HubSpot, its payout, terms, states and caps are read off the signed document and matched against CallGrid. Existing campaigns are recognized; anything new is flagged READY FOR SETUP for the team to build in CallGrid by hand — the dashboard never writes to CallGrid.</div>
       {(()=>{
         const ioChip=st=>{const col=st==="provisioned"?C.green:st==="exists"?C.teal:st==="ready_for_setup"?C.amber:st==="needs_review"?C.purple:st==="error"?C.red:C.sub;
           return <span style={{fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:10,background:col+"22",color:col,whiteSpace:"nowrap"}}>{String(st||"").replace("_"," ").toUpperCase()}</span>;};
@@ -13767,8 +16590,7 @@ function pubDispoLabel(l){
 function PublisherReports({callgridCalls}){
   const etFmt=new Intl.DateTimeFormat("en-CA",{timeZone:"America/New_York",year:"numeric",month:"2-digit",day:"2-digit"});
   const etClockFmt=new Intl.DateTimeFormat("en-US",{timeZone:"America/New_York",hour:"numeric",minute:"2-digit",hour12:true});
-  const [start,setStart]=useState(()=>{const d=new Date();d.setDate(d.getDate()-6);return etFmt.format(d);});
-  const [end,setEnd]=useState(()=>etFmt.format(new Date()));
+  const [start,end,setStart,setEnd]=usePersistentRange("pubrep_range",7);
   const pubNames=[...new Set((callgridCalls||[]).map(r=>r.publisher_name).filter(Boolean))].sort();
   const [pub,setPub]=usePersistentState("nyala_pubreport_pub","");
   const effPub=pubNames.includes(pub)?pub:(pubNames[0]||"");
@@ -14008,8 +16830,7 @@ function cfTerms(freq,btype,net){
 }
 function CashFlow({clients,publishers,clientCampaigns,publisherCampaigns,callgridCalls}){
   const etFmt=new Intl.DateTimeFormat("en-CA",{timeZone:"America/New_York",year:"numeric",month:"2-digit",day:"2-digit"});
-  const [start,setStart]=useState(()=>{const d=new Date();d.setDate(d.getDate()-29);return etFmt.format(d);});
-  const [end,setEnd]=useState(()=>etFmt.format(new Date()));
+  const [start,end,setStart,setEnd]=usePersistentRange("cf_range",30);
   const [vertTab,setVertTab]=usePersistentState("nyala_cashflow_vert","Final Expense");
   const [expClient,setExpClient]=useState(null);
   const [expPub,setExpPub]=useState(null);
@@ -14122,7 +16943,7 @@ function CashFlow({clients,publishers,clientCampaigns,publisherCampaigns,callgri
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20,marginBottom:20}}>
       <div style={card}>
         <h3 style={{margin:"0 0 6px",fontSize:15}}>Clients (consuming) — {vt}</h3>
-        <div style={{fontSize:11,color:C.dim,marginBottom:10}}>Click a client to see the publishers supplying its volume.</div>
+        <div style={{fontSize:11,color:C.dim,marginBottom:10}}>Click a client to see its campaigns with their terms, plus the publishers supplying its volume.</div>
         <Table cols={[
           {key:"name",label:"Client",render:v=><button onClick={()=>setExpClient(expClient===v?null:v)} style={{background:"none",border:"none",color:C.text,cursor:"pointer",padding:0,fontSize:13,display:"flex",alignItems:"center",gap:6,textAlign:"left"}}><span style={{color:C.accent,fontSize:11}}>{expClient===v?"▾":"▸"}</span>{v}</button>},
           {key:"terms",label:"Pays Us",render:v=><span style={{fontSize:12,color:v==="— not set —"?C.amber:C.sub}}>{v}</span>},
@@ -14131,8 +16952,17 @@ function CashFlow({clients,publishers,clientCampaigns,publisherCampaigns,callgri
           {key:"rev",label:"Revenue",right:true,render:v=><span style={{...mono,color:C.green}}>{fmt$(v)}</span>},
         ]} rows={clientRows} expandedRow={expClient} renderExpanded={row=>{
           const subs=pairRows.filter(p=>p.client===row.id).sort((x,y)=>y.calls-x.calls);
+          const camps=(()=>{const m=new Map();for(const r of vRows){if(r.clName!==row.id)continue;const k=r.cc?r.cc.id:"__none";const t=r.cc?cfTerms(r.cc.billing_frequency,r.cc.billing_type,r.cc.net_terms).str:null;const a=m.get(k)||{id:k,name:r.cc?r.cc.name:"(no campaign match)",terms:t||"— not set —",calls:0,rev:0};a.calls++;a.rev+=r.rev;m.set(k,a);}return [...m.values()].sort((x,y)=>y.calls-x.calls);})();
           return <div style={{padding:"8px 16px 16px 30px",background:"rgba(255,255,255,0.02)"}}>
-            <div style={{fontSize:11,color:C.sub,textTransform:"uppercase",letterSpacing:"0.06em",margin:"8px 0"}}>{row.name} · supplied by</div>
+            <div style={{fontSize:11,color:C.sub,textTransform:"uppercase",letterSpacing:"0.06em",margin:"8px 0"}}>{row.name} · campaigns & terms</div>
+            <Table cols={[
+              {key:"name",label:"Campaign"},
+              {key:"terms",label:"Pays Us",render:v=><span style={{fontSize:12,color:v==="— not set —"?C.amber:C.sub}}>{v}</span>},
+              {key:"calls",label:"Calls",right:true,render:v=><span style={mono}>{v.toLocaleString()}</span>},
+              {key:"_sh",label:"% of Client",right:true,render:(v,r)=><span style={{...mono,color:r.calls/row.calls>=0.3?C.accent:C.sub}}>{pc2(r.calls,row.calls)}</span>},
+              {key:"rev",label:"Revenue",right:true,render:v=><span style={{...mono,color:C.green}}>{fmt$(v)}</span>},
+            ]} rows={camps} emptyMsg="No campaigns."/>
+            <div style={{fontSize:11,color:C.sub,textTransform:"uppercase",letterSpacing:"0.06em",margin:"14px 0 8px"}}>{row.name} · supplied by</div>
             <Table cols={[
               {key:"pub",label:"Publisher"},
               {key:"pubTerms",label:"We Pay",render:v=><span style={{fontSize:12,color:C.sub}}>{v}</span>},
@@ -14146,7 +16976,7 @@ function CashFlow({clients,publishers,clientCampaigns,publisherCampaigns,callgri
       </div>
       <div style={card}>
         <h3 style={{margin:"0 0 6px",fontSize:15}}>Publishers (supplying) — {vt}</h3>
-        <div style={{fontSize:11,color:C.dim,marginBottom:10}}>Click a publisher to see which clients consume its volume.</div>
+        <div style={{fontSize:11,color:C.dim,marginBottom:10}}>Click a publisher to see its campaigns with their terms, plus the clients consuming its volume.</div>
         <Table cols={[
           {key:"name",label:"Publisher",render:v=><button onClick={()=>setExpPub(expPub===v?null:v)} style={{background:"none",border:"none",color:C.text,cursor:"pointer",padding:0,fontSize:13,display:"flex",alignItems:"center",gap:6,textAlign:"left"}}><span style={{color:C.accent,fontSize:11}}>{expPub===v?"▾":"▸"}</span>{v}</button>},
           {key:"terms",label:"We Pay",render:v=><span style={{fontSize:12,color:v==="— not set —"?C.amber:C.sub}}>{v}</span>},
@@ -14155,8 +16985,17 @@ function CashFlow({clients,publishers,clientCampaigns,publisherCampaigns,callgri
           {key:"pay",label:"Payout",right:true,render:v=><span style={{...mono,color:C.amber}}>{fmt$(v)}</span>},
         ]} rows={pubRows} expandedRow={expPub} renderExpanded={row=>{
           const subs=pairRows.filter(p=>p.pub===row.id).sort((x,y)=>y.calls-x.calls);
+          const camps=(()=>{const m=new Map();for(const r of vRows){if(r.pubName!==row.id)continue;const k=r.pcamp?r.pcamp.id:"__none";const t=r.pcamp?cfTerms(r.pcamp.billing_frequency,r.pcamp.billing_type,r.pcamp.net_terms).str:null;const a=m.get(k)||{id:k,name:r.pcamp?(r.pcamp.callgrid_campaign_name||r.pcamp.name):"(no campaign match)",terms:t||"— not set —",calls:0,pay:0};a.calls++;a.pay+=r.pay;m.set(k,a);}return [...m.values()].sort((x,y)=>y.calls-x.calls);})();
           return <div style={{padding:"8px 16px 16px 30px",background:"rgba(255,255,255,0.02)"}}>
-            <div style={{fontSize:11,color:C.sub,textTransform:"uppercase",letterSpacing:"0.06em",margin:"8px 0"}}>{row.name} · feeds</div>
+            <div style={{fontSize:11,color:C.sub,textTransform:"uppercase",letterSpacing:"0.06em",margin:"8px 0"}}>{row.name} · campaigns & terms</div>
+            <Table cols={[
+              {key:"name",label:"Campaign"},
+              {key:"terms",label:"We Pay",render:v=><span style={{fontSize:12,color:v==="— not set —"?C.amber:C.sub}}>{v}</span>},
+              {key:"calls",label:"Calls",right:true,render:v=><span style={mono}>{v.toLocaleString()}</span>},
+              {key:"_sh",label:"% of Publisher",right:true,render:(v,r)=><span style={{...mono,color:r.calls/row.calls>=0.3?C.accent:C.sub}}>{pc2(r.calls,row.calls)}</span>},
+              {key:"pay",label:"Payout",right:true,render:v=><span style={{...mono,color:C.amber}}>{fmt$(v)}</span>},
+            ]} rows={camps} emptyMsg="No campaigns."/>
+            <div style={{fontSize:11,color:C.sub,textTransform:"uppercase",letterSpacing:"0.06em",margin:"14px 0 8px"}}>{row.name} · feeds</div>
             <Table cols={[
               {key:"client",label:"Client"},
               {key:"clientTerms",label:"Pays Us",render:v=><span style={{fontSize:12,color:C.sub}}>{v}</span>},
@@ -14185,6 +17024,750 @@ function CashFlow({clients,publishers,clientCampaigns,publisherCampaigns,callgri
     </div>
   </div>;
 }
+// ─────────────────────────── Profit Coach (Ryan's page) ───────────────────────────
+// Ryan's Profit Coach, byte-untouched in Storage, served live by the
+// profit-coach-page function and mounted here in a sandboxed iframe via a
+// blob URL (his hash navigation needs a real URL). On load the dashboard
+// sends its palette into the page (his colors are all CSS variables), so it
+// follows light and dark mode. driveRef lets the Alerts tiles click his own
+// filter chips.
+// ═══════════════════════ PROFIT COACH (Nyala native) ═══════════════════════
+// Nyala's own build of Ryan's OmniSure Profit Coach. OmniSure's version pulls
+// 17 CallGrid summary reports; Nyala's partner key can't read those, and
+// Nyala's revenue/cost come from DIDs + buyer offers, not CallGrid. So the
+// same report rows are built here from the synced calls (callgrid_calls,
+// already loaded for the whole app), and Ryan's rules run on them UNCHANGED
+// (PC_RULES below is his profit-coach.js, typed annotations stripped).
+// Ad-claim/ad-source checks need CallGrid insight tags, which the partner
+// feed doesn't carry yet; those report rows stay empty until it does.
+const PC_RULES=(()=>{
+  const NON_TV = ["Phone Pop-up", "Social Media", "Website or Search", "Text Message", "Mail"];
+  const RED_PROMISE = ["Free Coverage", "Benefit or Grocery Card", "Cash or Gift Card", "Government Program", "Other Claim"];
+  const SKIP = /~Test/i;
+  const etDay = (d) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+  function shift(day, n) {
+    const d = /* @__PURE__ */ new Date(day + "T12:00:00Z");
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  }
+  function dates(now = /* @__PURE__ */ new Date()) {
+    const today = etDay(now);
+    return { today, wkStart: shift(today, -7), wkEnd: shift(today, -1), prStart: shift(today, -14), prEnd: shift(today, -8), tagStart: shift(today, -6) };
+  }
+  const num = (v) => Number(v && typeof v === "object" ? v.value : v) || 0;
+  const label = (k) => String(k).split(":").slice(1).join(":").trim() || String(k);
+  function row(b) {
+    const calls = b.doc_count || 0, rev = num(b.total_revenue), pay = num(b.total_payout), profit = num(b.profit);
+    return {
+      name: label(b.key),
+      id: b.id,
+      calls,
+      billable: num(b.billable_count),
+      noRoute: num(b.no_route_count),
+      noAnswer: num(b.no_answer_count),
+      busy: num(b.busy_count),
+      rejected: num(b.rejected_count),
+      dup: num(b.duplicate_count),
+      connected: num(b.connected_count),
+      live: num(b.live_count),
+      rev,
+      pay,
+      profit,
+      cost: num(b.cost),
+      avgLen: num(b.average_call_length),
+      margin: rev > 0 ? profit / rev : 0,
+      subs: (b.by_second_pivot && b.by_second_pivot.buckets || []).map(row)
+    };
+  }
+  const byName = (rows) => Object.fromEntries((rows || []).map((r) => [r.name, r]));
+  const sum = (rows, k) => (rows || []).reduce((s, r) => s + r[k], 0);
+  const money = (v) => (v < 0 ? "\u2212$" : "$") + Math.abs(Math.round(v)).toLocaleString("en-US");
+  const pct = (v) => (v * 100).toFixed(v !== 0 && Math.abs(v) < 0.1 ? 1 : 0) + "%";
+  const n0 = (v) => Math.round(v).toLocaleString("en-US");
+  function buildRecs(R) {
+    const recs = [];
+    const add = (r) => {
+      r.key = r.cat + "|" + r.title;
+      recs.push(r);
+    };
+    const pw = R.pubWeek || [], pp = byName(R.pubPrior), pt = R.pubToday, bw = R.buyerWeek || [], bp = byName(R.buyerPrior);
+    const orgPPC = sum(pw, "profit") / Math.max(1, sum(pw, "calls"));
+    (R.promise || []).forEach((p) => {
+      const red = p.subs.filter((s) => RED_PROMISE.includes(s.name) && s.calls > 0);
+      const n = sum(red, "calls");
+      if (!n) return;
+      add({
+        cat: "Compliance",
+        sev: "high",
+        who: p.name,
+        risk: true,
+        title: `Talk to ${p.name} about ad claims`,
+        why: `${n} of ${p.name}'s ${p.calls} calls this week ${n > 1 ? "mention" : "mentions"} ${red.map((s) => `${s.name} (${s.calls})`).join(", ")}.`,
+        todo: `Ask ${p.name} for the creative and placements running now, and have them pull any ad that promises free coverage, cards, cash or a government program. Check the calls in the Call Alerts browser before the call.`
+      });
+    });
+    (R.adsource || []).forEach((p) => {
+      const tagged = p.subs.filter((s) => s.name !== "Not Mentioned" && s.name !== "Other");
+      const total = sum(tagged, "calls");
+      const bad = p.subs.filter((s) => NON_TV.includes(s.name) && s.calls > 0);
+      const n = sum(bad, "calls");
+      if (n < 3 || !total || n / total < 0.1) return;
+      add({
+        cat: "Compliance",
+        sev: "high",
+        who: p.name,
+        risk: true,
+        title: `${p.name} is sending non-TV callers into TV campaigns`,
+        why: `${n} of ${total} callers who named a source said ${bad.map((s) => `${s.name} (${s.calls})`).join(", ")} instead of TV (${pct(n / total)}).`,
+        todo: `Ask ${p.name} where this traffic comes from. TV campaigns pay TV rates, so pop-up, text or social traffic must move to the right campaign or stop.`
+      });
+    });
+    pw.concat(Object.values(pp).filter((r) => !pw.find((x) => x.name === r.name))).forEach((cur) => {
+      const prev = pp[cur.name];
+      if (!prev || prev.profit < 150) return;
+      const curCalls = pw.find((x) => x.name === cur.name) ? cur.calls : 0, curProfit = pw.find((x) => x.name === cur.name) ? cur.profit : 0;
+      if (curCalls > prev.calls * 0.7) return;
+      const lost = prev.profit - curProfit;
+      if (lost <= 50) return;
+      add({
+        cat: "Call a pub",
+        sev: lost > 1e3 ? "high" : "med",
+        who: cur.name,
+        impact: lost,
+        title: `Reach out to ${cur.name}: volume down ${pct(1 - curCalls / prev.calls)}`,
+        why: `${n0(curCalls)} calls and ${money(curProfit)} profit in the last 7 days, against ${n0(prev.calls)} calls and ${money(prev.profit)} the week before.`,
+        todo: `Ask what changed (budget, caps, creative, a competing buyer) and what it would take to get back to ${n0(prev.calls)} calls a week.`
+      });
+    });
+    if (pt && pt.length) {
+      const todayTotal = sum(pt, "calls"), weekTotal = sum(pw, "calls"), ptBy = byName(pt);
+      if (todayTotal >= 40 && weekTotal) pw.forEach((p) => {
+        const expected = todayTotal * (p.calls / weekTotal), actual = ptBy[p.name] ? ptBy[p.name].calls : 0;
+        if (expected < 10 || actual >= expected * 0.5 || p.profit <= 0) return;
+        const gap = (expected - actual) * (p.profit / p.calls) * 7;
+        add({
+          cat: "Call a pub",
+          sev: "med",
+          who: p.name,
+          impact: gap,
+          today: true,
+          title: `${p.name} is behind today`,
+          why: `${n0(actual)} calls so far today, where their usual share of today's ${n0(todayTotal)} calls would be about ${n0(expected)}.`,
+          todo: `Check with ${p.name} now: are they paused, capped or out of budget? If a buyer filter is rejecting them, fix it on our side first.`
+        });
+      });
+    }
+    pw.forEach((p) => {
+      if (p.profit < 400 || p.margin < 0.25 || p.billable / Math.max(1, p.calls) < 0.35) return;
+      add({
+        cat: "Call a pub",
+        sev: "low",
+        who: p.name,
+        impact: p.profit * 0.25,
+        title: `Ask ${p.name} for more volume`,
+        why: `${pct(p.margin)} margin and ${money(p.profit)} profit on ${n0(p.calls)} calls, with ${pct(p.billable / p.calls)} billable. This is one of your best pubs.`,
+        todo: `Offer ${p.name} a higher cap or a small payout bump for 25% more calls. Each extra call earns about ${money(p.profit / p.calls)}.`
+      });
+    });
+    pw.forEach((p) => {
+      const waste = p.rejected + p.dup;
+      if (waste < 20 || waste / p.calls < 0.15) return;
+      const ppc = p.profit / Math.max(1, p.calls - waste);
+      add({
+        cat: "Fix routing",
+        sev: waste / p.calls > 0.3 ? "high" : "med",
+        who: p.name,
+        impact: Math.max(0, waste * ppc * 0.3),
+        title: `Cut ${p.name}'s rejected and repeat calls`,
+        why: `${n0(p.rejected)} rejected and ${n0(p.dup)} duplicate calls out of ${n0(p.calls)} (${pct(waste / p.calls)}).`,
+        todo: `Share the rejection reasons with ${p.name} and ask them to dedupe before sending. If good calls are being rejected by a cap or filter, loosen it.`
+      });
+    });
+    pw.forEach((p) => {
+      if (p.calls < 30 || p.rev > 0) return;
+      add({
+        cat: "Fix routing",
+        sev: "med",
+        who: p.name,
+        impact: 0,
+        noDollar: "No revenue",
+        title: `${p.name} sent ${n0(p.calls)} calls that earned nothing`,
+        why: `$0 revenue this week. Average call length ${Math.round(p.avgLen)}s, ${n0(p.noRoute)} with no buyer.`,
+        todo: `Check which campaign and number ${p.name} is sending to, and whether a buyer is attached. If the calls are junk, pause the source.`
+      });
+    });
+    (R.campPub || []).forEach((c) => c.subs.forEach((l) => {
+      if (SKIP.test(l.name)) return;
+      if (l.profit < -20) {
+        add({
+          cat: "Renegotiate",
+          sev: "high",
+          who: l.name,
+          impact: -l.profit,
+          title: `${l.name} on ${c.name} is losing money`,
+          why: `Paid ${money(l.pay)} for calls that earned ${money(l.rev)} this week (${money(l.profit)}).`,
+          todo: `Check ${c.name} in HubSpot: every number it uses needs a DID tied to a buyer offer, and the offer rate should beat what ${l.name} charges. If it already does, ask ${l.name} to reprice or pause it.`
+        });
+      } else if (l.rev >= 500 && l.margin < 0.12) {
+        const gain = l.rev * 0.2 - l.profit;
+        add({
+          cat: "Renegotiate",
+          sev: gain > 500 ? "med" : "low",
+          who: l.name,
+          impact: gain,
+          title: `Thin margin: ${l.name} on ${c.name}`,
+          why: `${pct(l.margin)} margin: ${money(l.rev)} revenue, ${money(l.pay)} payout, ${n0(l.billable)} billable calls.`,
+          todo: `Ask ${l.name} to take about ${money((l.pay - l.rev * 0.8) / Math.max(1, l.billable))} less per billable call, or find a buyer that pays more for this campaign. Getting to 20% adds ${money(gain)} a week.`
+        });
+      }
+    }));
+    (R.campBuyer || []).forEach((c) => {
+      if (SKIP.test(c.name)) return;
+      const lost = c.noRoute + c.noAnswer + c.busy, routed = c.calls - lost;
+      if (!c.subs.length && c.calls >= 10) {
+        add({
+          cat: "Fix routing",
+          sev: "high",
+          who: c.name,
+          impact: c.calls * orgPPC * 0.5,
+          title: `No buyer is taking ${c.name}`,
+          why: `All ${n0(c.calls)} calls this week found no buyer.`,
+          todo: `Attach a buyer to ${c.name}, or point its numbers at a live campaign until one is ready.`
+        });
+        return;
+      }
+      if (lost < 15 || lost / c.calls < 0.15) return;
+      const ppc = routed > 0 ? Math.max(0, c.profit) / routed : 0;
+      add({
+        cat: "Fix routing",
+        sev: lost / c.calls > 0.3 ? "high" : "med",
+        who: c.name,
+        impact: lost * ppc * 0.5,
+        title: `Add buyer capacity on ${c.name}`,
+        why: `${n0(lost)} of ${n0(c.calls)} calls (${pct(lost / c.calls)}) were lost: ${n0(c.noRoute)} no buyer, ${n0(c.noAnswer)} not answered, ${n0(c.busy)} busy.`,
+        todo: `Raise caps or hours with the buyers on ${c.name}, or add a backup buyer. Routed calls here earn about ${money(ppc)} each.`
+      });
+    });
+    bw.concat(Object.values(bp).filter((r) => !bw.find((x) => x.name === r.name))).forEach((b) => {
+      const prev = bp[b.name];
+      if (!prev || prev.rev < 300) return;
+      const cur = bw.find((x) => x.name === b.name) || { billable: 0, rev: 0, profit: 0, calls: 0 };
+      if (cur.billable > prev.billable * 0.6) return;
+      const lost = prev.profit - cur.profit;
+      if (lost <= 50) return;
+      add({
+        cat: "Call a buyer",
+        sev: lost > 800 ? "high" : "med",
+        who: b.name,
+        impact: lost,
+        title: `Call ${b.name}: billable calls down ${pct(1 - cur.billable / Math.max(1, prev.billable))}`,
+        why: `${n0(cur.billable)} billable calls and ${money(cur.rev)} revenue in the last 7 days, against ${n0(prev.billable)} and ${money(prev.rev)} the week before.`,
+        todo: `Ask ${b.name} if they cut caps, hours or budget, and whether call quality changed. If they're full, move volume to another buyer.`
+      });
+    });
+    (R.campBuyer || []).forEach((c) => {
+      const live = c.subs.filter((b) => !SKIP.test(b.name));
+      const best = live.filter((b) => b.calls >= 10).sort((a, b) => b.profit / b.calls - a.profit / a.calls)[0];
+      live.forEach((b) => {
+        if (b.calls >= 30 && b.billable === 0) {
+          const ref = best && best !== b && best.profit > 0 ? best.profit / best.calls : orgPPC * 0.5;
+          add({
+            cat: "Call a buyer",
+            sev: "med",
+            who: b.name,
+            impact: b.calls * ref * 0.5,
+            title: `${b.name} billed none of ${n0(b.calls)} calls on ${c.name}`,
+            why: `0 billable calls this week on ${c.name}.`,
+            todo: `Confirm ${b.name}'s buffer, duration and terms on ${c.name}. If calls aren't converting for them, route to a buyer that pays.`
+          });
+          return;
+        }
+        if (!best || best === b || b.calls < 30 || best.profit <= 0) return;
+        const ppcB = b.profit / b.calls, ppcBest = best.profit / best.calls;
+        if (ppcB >= ppcBest * 0.5) return;
+        const gain = b.calls * (ppcBest - ppcB) * 0.5;
+        if (gain < 40) return;
+        add({
+          cat: "Fix routing",
+          sev: "low",
+          who: b.name,
+          impact: gain,
+          title: `Shift ${c.name} calls from ${b.name} to ${best.name}`,
+          why: `${b.name} earns ${money(ppcB)} a call (${pct(b.billable / b.calls)} billable) on ${n0(b.calls)} calls. ${best.name} earns ${money(ppcBest)} a call (${pct(best.billable / best.calls)} billable).`,
+          todo: `Raise ${best.name}'s priority or cap on ${c.name} and lower ${b.name}'s, as far as ${best.name} has room.`
+        });
+      });
+    });
+    recs.forEach((r) => {
+      r.impact = Math.max(0, r.impact || 0);
+    });
+    recs.sort((a, b) => (b.risk ? 1 : 0) - (a.risk ? 1 : 0) || b.impact - a.impact);
+    return recs;
+  }
+  function clock(now = /* @__PURE__ */ new Date()) {
+    const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "numeric", hourCycle: "h23" }).formatToParts(now).map((x) => [x.type, x.value]));
+    const H = Number(p.hour) % 24, M = Number(p.minute);
+    return { H, frac: Math.max(M, 5) / 60 };
+  }
+  const hourLabel = (h) => (h % 12 || 12) + (h < 12 ? " AM" : " PM");
+  const hours = (r) => {
+    const m = {};
+    (r ? r.subs : []).forEach((s) => {
+      const h = parseInt(s.name, 10);
+      if (!isNaN(h)) m[h] = s;
+    });
+    return m;
+  };
+  const lostOf = (s) => s ? s.noRoute + s.noAnswer + s.busy : 0;
+  function win(r, H) {
+    const m = hours(r), a = m[H - 1], b = m[H];
+    const pick = (k) => (a ? a[k] : 0) + (b ? b[k] : 0);
+    return { calls: pick("calls"), lost: lostOf(a) + lostOf(b), noRoute: pick("noRoute"), noAnswer: pick("noAnswer"), billable: pick("billable"), profit: pick("profit") };
+  }
+  function usual(r, H, frac) {
+    const m = hours(r), a = m[H - 1], b = m[H];
+    return { calls: ((a ? a.calls : 0) + (b ? b.calls * frac : 0)) / 7, profit: ((a ? a.profit : 0) + (b ? b.profit * frac : 0)) / 7 };
+  }
+  function buildNow(R, now = /* @__PURE__ */ new Date()) {
+    const D = dates(now);
+    const { H, frac } = clock(now), out = [], span = 1 + frac;
+    const add = (r) => {
+      r.key = "now|" + D.today + "|" + H + "|" + r.cat + "|" + r.title;
+      r.perHour = Math.max(0, r.perHour || 0);
+      out.push(r);
+    };
+    const pw = byName(R.pubWeek), bw = byName(R.buyerWeek);
+    const ppc = (name) => {
+      const p = pw[name];
+      return p && p.calls ? p.profit / p.calls : 0;
+    };
+    const bppc = (name) => {
+      const b = bw[name];
+      return b && b.calls ? b.profit / b.calls : 0;
+    };
+    const since = hourLabel(Math.max(0, H - 1));
+    (R.promiseToday || []).forEach((p) => {
+      const red = p.subs.filter((s) => RED_PROMISE.includes(s.name) && s.calls > 0), n = sum(red, "calls");
+      if (!n) return;
+      add({
+        cat: "Compliance",
+        sev: "high",
+        who: p.name,
+        risk: true,
+        title: `${p.name}: ${n} call${n > 1 ? "s" : ""} today ${n > 1 ? "mention" : "mentions"} ${red.map((s) => s.name).join(", ")}`,
+        why: `Callers from ${p.name} said the ad promised or they asked for ${red.map((s) => `${s.name} (${s.calls})`).join(", ")} today.`,
+        fix: `Message ${p.name} now to pull the ad. If they can't confirm within the hour, pause their numbers on TV campaigns.`,
+        gain: "Protects buyer relationships and chargebacks"
+      });
+    });
+    (R.adsourceToday || []).forEach((p) => {
+      const bad = p.subs.filter((s) => NON_TV.includes(s.name) && s.calls > 0), n = sum(bad, "calls");
+      const tagged = sum(p.subs.filter((s) => s.name !== "Not Mentioned" && s.name !== "Other"), "calls");
+      if (n < 2 || !tagged || n / tagged < 0.15) return;
+      add({
+        cat: "Compliance",
+        sev: "high",
+        who: p.name,
+        risk: true,
+        title: `${p.name} is sending non-TV callers into TV campaigns today`,
+        why: `${n} of ${tagged} callers today named ${bad.map((s) => `${s.name} (${s.calls})`).join(", ")} instead of TV.`,
+        fix: `Ask ${p.name} which source is live right now and have them move it off the TV numbers today.`,
+        gain: "Keeps TV buyers paying TV rates"
+      });
+    });
+    (R.campPubToday || []).forEach((c) => c.subs.forEach((l) => {
+      if (SKIP.test(l.name) || l.profit >= -20 || !l.calls) return;
+      const lossPerCall = -l.profit / l.calls;
+      add({
+        cat: "Stop a loss",
+        sev: "high",
+        who: l.name,
+        perHour: -l.profit / Math.max(1, H + frac - 8),
+        title: `${l.name} on ${c.name} is losing money today`,
+        why: `${n0(l.calls)} calls today: paid ${money(l.pay)}, earned ${money(l.rev)} (${money(l.profit)}).`,
+        fix: `Check ${c.name} in HubSpot first: a call on a number with no DID tied to a buyer offer earns $0, and the offer rate should beat what ${l.name} charges. If both are right, ask ${l.name} to pause it until it's fixed.`,
+        gain: `Stops about ${money(lossPerCall)} lost per call`
+      });
+    }));
+    (R.campHourToday || []).forEach((c) => {
+      if (SKIP.test(c.name)) return;
+      const w = win(c, H);
+      if (w.lost < 4 || w.lost / w.calls < 0.2) return;
+      const routed = w.calls - w.lost, cppc = routed > 0 ? Math.max(0, w.profit) / routed : 0;
+      const ref = cppc || (c.calls - lostOf(c) > 0 ? Math.max(0, c.profit) / (c.calls - lostOf(c)) : 0);
+      const why = `${n0(w.lost)} of ${n0(w.calls)} calls since ${since} were lost: ${n0(w.noRoute)} no buyer, ${n0(w.noAnswer)} not answered.`;
+      const fix = w.noRoute >= w.noAnswer ? `Raise caps or open hours for the buyers on ${c.name}, or add a backup buyer to its routing now.` : `Buyers on ${c.name} aren't picking up. Call them to staff up, or lower the ring timeout and add a backup buyer.`;
+      add({
+        cat: "Fix routing",
+        sev: w.lost / w.calls > 0.35 ? "high" : "med",
+        who: c.name,
+        perHour: w.lost / span * ref,
+        title: `${c.name} is dropping ${pct(w.lost / w.calls)} of calls right now`,
+        why,
+        fix,
+        gain: `Each saved call earns about ${money(ref)}`
+      });
+    });
+    const ptToday = byName(R.pubHourToday), ptPrior = R.pubHourPrior || [];
+    ptPrior.forEach((p) => {
+      if (SKIP.test(p.name)) return;
+      const u = usual(p, H, frac);
+      if (u.calls < 4) return;
+      const w = win(ptToday[p.name], H);
+      if (w.calls > u.calls * 0.35) return;
+      const short = u.calls - w.calls, v = ppc(p.name);
+      if (v <= 0) return;
+      const today = ptToday[p.name] ? ptToday[p.name].calls : 0;
+      add({
+        cat: "Call a pub",
+        sev: u.calls >= 10 ? "high" : "med",
+        who: p.name,
+        perHour: short / span * v,
+        title: `${p.name} has gone quiet: ${n0(w.calls)} calls since ${since}, usually ${n0(u.calls)}`,
+        why: `${today ? n0(today) + " calls earlier today, so they were running." : "No calls at all today."} Each of their calls earns about ${money(v)}.`,
+        fix: `Call ${p.name} now: ask if they're paused, capped or out of budget, and get them back on. If a cap on our side is blocking them, raise it.`,
+        gain: `Back to normal is worth about ${money(short / span * v)}/hr`
+      });
+    });
+    ptPrior.concat((R.pubHourToday || []).filter((r) => !ptPrior.find((x) => x.name === r.name))).forEach((p) => {
+      if (SKIP.test(p.name)) return;
+      const u = usual(p, H, frac), w = win(ptToday[p.name], H), v = ppc(p.name);
+      if (w.calls < 8 || w.calls < Math.max(2 * u.calls, u.calls + 6) || v <= 0) return;
+      const lostShare = w.calls ? w.lost / w.calls : 0;
+      add({
+        cat: lostShare > 0.2 ? "Fix routing" : "Call a pub",
+        sev: lostShare > 0.2 ? "high" : "low",
+        who: p.name,
+        perHour: (w.calls - u.calls) / span * v,
+        title: `${p.name} is surging: ${n0(w.calls)} calls since ${since}, usually ${n0(u.calls)}`,
+        why: lostShare > 0.2 ? `${pct(lostShare)} of those calls were lost to no buyer or no answer.` : `Billable on ${n0(w.billable)} of them so far.`,
+        fix: lostShare > 0.2 ? `Open more buyer capacity for ${p.name}'s campaigns now so the extra calls get paid.` : `Tell ${p.name} the traffic is converting and ask them to keep the budget on through the afternoon.`,
+        gain: `Extra volume is worth about ${money((w.calls - u.calls) / span * v)}/hr`
+      });
+    });
+    const btToday = byName(R.buyerHourToday);
+    (R.buyerHourToday || []).forEach((b) => {
+      if (SKIP.test(b.name)) return;
+      const w = win(b, H);
+      if (w.noAnswer < 3 || w.noAnswer / w.calls < 0.25) return;
+      const v = bppc(b.name) || sum(R.pubWeek || [], "profit") / Math.max(1, sum(R.pubWeek || [], "calls"));
+      add({
+        cat: "Call a buyer",
+        sev: w.noAnswer / w.calls > 0.4 ? "high" : "med",
+        who: b.name,
+        perHour: w.noAnswer / span * v,
+        title: `${b.name} isn't answering: ${n0(w.noAnswer)} of ${n0(w.calls)} calls since ${since}`,
+        why: `Unanswered calls are unpaid calls. ${b.name} earns about ${money(v)} a call when they pick up.`,
+        fix: `Call ${b.name} to check staffing. Until they confirm, lower their priority so calls roll to the next buyer.`,
+        gain: `Answering those is worth about ${money(w.noAnswer / span * v)}/hr`
+      });
+    });
+    (R.buyerHourPrior || []).forEach((b) => {
+      if (SKIP.test(b.name)) return;
+      const u = usual(b, H, frac);
+      if (u.calls < 4) return;
+      const w = win(btToday[b.name], H);
+      if (w.calls > 0) return;
+      const v = bppc(b.name);
+      if (v <= 0) return;
+      add({
+        cat: "Call a buyer",
+        sev: "med",
+        who: b.name,
+        perHour: u.calls / span * v * 0.5,
+        title: `${b.name} has taken no calls since ${since}`,
+        why: `They usually take about ${n0(u.calls)} by now and earn ${money(v)} a call. They may be capped, closed or failing pings.`,
+        fix: `Check ${b.name}'s cap and hours in CallGrid; if they're capped, ask for more room today.`,
+        gain: `Getting them back is worth about ${money(u.calls / span * v * 0.5)}/hr`
+      });
+    });
+    out.sort((a, b) => (b.risk ? 1 : 0) - (a.risk ? 1 : 0) || b.perHour - a.perHour);
+    return out;
+  }
+  function buildSummary(R, nowList) {
+    const { H, frac } = clock();
+    const pt = R.pubToday || [];
+    let calls2h = 0, lost2h = 0, usual2h = 0, usualProfitByNow = 0;
+    (R.pubHourToday || []).forEach((p) => {
+      const w = win(p, H);
+      calls2h += w.calls;
+      lost2h += w.lost;
+    });
+    (R.pubHourPrior || []).forEach((p) => {
+      const u = usual(p, H, frac);
+      usual2h += u.calls;
+      const m = hours(p);
+      for (let h = 0; h <= H; h++) {
+        const s = m[h];
+        if (s) usualProfitByNow += h < H ? s.profit : s.profit * frac;
+      }
+    });
+    usualProfitByNow /= 7;
+    const hrT = /* @__PURE__ */ new Map(), hrU = /* @__PURE__ */ new Map(), hrL = /* @__PURE__ */ new Map();
+    (R.pubHourToday || []).forEach((p) => (p.subs || []).forEach((sx) => {
+      const h = parseInt(sx.name, 10);
+      if (isNaN(h)) return;
+      hrT.set(h, (hrT.get(h) || 0) + sx.calls);
+      hrL.set(h, (hrL.get(h) || 0) + sx.noRoute + sx.noAnswer + sx.busy);
+    }));
+    (R.pubHourPrior || []).forEach((p) => (p.subs || []).forEach((sx) => {
+      const h = parseInt(sx.name, 10);
+      if (isNaN(h)) return;
+      hrU.set(h, (hrU.get(h) || 0) + sx.calls / 7);
+    }));
+    const hoursOut = [];
+    for (let h = 7; h <= Math.min(21, Math.max(H + 1, 19)); h++) {
+      hoursOut.push({ h, today: hrT.get(h) || 0, usual: Math.round((hrU.get(h) || 0) * 10) / 10, lost: hrL.get(h) || 0 });
+    }
+    while (hoursOut.length && hoursOut[hoursOut.length - 1].today === 0 && hoursOut[hoursOut.length - 1].usual === 0) hoursOut.pop();
+    return {
+      live: sum(pt, "live"),
+      calls_today: sum(pt, "calls"),
+      profit_today: Math.round(sum(pt, "profit")),
+      usual_profit_by_now: Math.round(usualProfitByNow),
+      calls_2h: calls2h,
+      usual_2h: Math.round(usual2h),
+      lost_2h: lost2h,
+      fix_now_per_hour: Math.round(nowList.reduce((t, r) => t + (r.perHour || 0), 0)),
+      fix_now_count: nowList.length,
+      compliance_count: nowList.filter((r) => r.risk).length,
+      hours: hoursOut
+    };
+  }
+
+  return {buildRecs,buildNow,buildSummary,dates,money,pct,n0,hourLabel,hours,win,usual,lostOf,clock};
+})();
+
+// One call → the counters CallGrid's summary reports carry.
+function pcCallStats(c){
+  const st=String(c.call_status||"").toUpperCase();
+  const rev=Number(c.revenue)||0, pay=Number(c.payout)||0, cost=Number(c.telco_cost)||0;
+  return {calls:1,billable:c.billable?1:0,connected:c.connected?1:0,
+    noRoute:/NO_?ROUTE/.test(st)?1:0,noAnswer:/NO_?ANSWER/.test(st)?1:0,busy:/BUSY/.test(st)?1:0,
+    rejected:/REJECT/.test(st)?1:0,dup:/DUPLICATE/.test(st)?1:0,live:/LIVE|IN_?PROGRESS|RINGING/.test(st)?1:0,
+    rev,pay,cost,profit:rev-pay-cost,len:Number(c.call_length_seconds)||0};
+}
+const PC_KEYS=["calls","billable","connected","noRoute","noAnswer","busy","rejected","dup","live","rev","pay","cost","profit","len"];
+function pcFinish(r){r.avgLen=r.calls?r.len/r.calls:0;r.margin=r.rev>0?r.profit/r.rev:0;delete r.len;(r.subs||[]).forEach(pcFinish);return r;}
+// Pivot calls into rows (and optional second-pivot subs), like CallGrid's
+// /reports/stats answer after Ryan's row() parser.
+function pcPivot(calls,k1,k2){
+  const m=new Map();
+  for(const c of calls){
+    const a=k1(c);if(a==null||/~Test/i.test(a))continue;
+    let r=m.get(a);if(!r){r={name:String(a),subs:[],_s:new Map()};PC_KEYS.forEach(k=>r[k]=0);m.set(a,r);}
+    const s=pcCallStats(c);PC_KEYS.forEach(k=>r[k]+=s[k]);
+    if(k2){const b=k2(c);if(b!=null){let x=r._s.get(b);if(!x){x={name:String(b),subs:[]};PC_KEYS.forEach(k=>x[k]=0);r._s.set(b,x);r.subs.push(x);}PC_KEYS.forEach(k=>x[k]+=s[k]);}}
+  }
+  return [...m.values()].map(r=>{delete r._s;return pcFinish(r);}).sort((a,b)=>b.calls-a.calls);
+}
+const pcEtHour=c=>{const t=c.call_datetime?new Date(c.call_datetime):null;return t?Number(new Intl.DateTimeFormat("en-US",{timeZone:"America/New_York",hour:"numeric",hour12:false}).format(t))%24:null;};
+function pcReports(calls,now=new Date()){
+  const D=PC_RULES.dates(now);
+  const inR=(a,b)=>calls.filter(c=>{const d=String(c.date||"").slice(0,10);return d>=a&&d<=b;});
+  const wk=inR(D.wkStart,D.wkEnd),pr=inR(D.prStart,D.prEnd),td=inR(D.today,D.today);
+  const pub=c=>c.publisher_name||"(no publisher)",buyer=c=>c.target_name||"(no buyer)",camp=c=>c.campaign_name||"(no campaign)";
+  return {D,R:{
+    pubWeek:pcPivot(wk,pub),pubPrior:pcPivot(pr,pub),pubToday:pcPivot(td,pub),
+    buyerWeek:pcPivot(wk,buyer),buyerPrior:pcPivot(pr,buyer),
+    campBuyer:pcPivot(wk,camp,buyer),campPub:pcPivot(wk,camp,pub),
+    promise:[],adsource:[],promiseToday:[],adsourceToday:[],
+    pubHourToday:pcPivot(td,pub,pcEtHour),pubHourPrior:pcPivot(wk,pub,pcEtHour),
+    campHourToday:pcPivot(td,camp,pcEtHour),buyerHourToday:pcPivot(td,buyer,pcEtHour),buyerHourPrior:pcPivot(wk,buyer,pcEtHour),
+    campPubToday:pcPivot(td,camp,pub),
+  }};
+}
+
+function NyalaProfitCoach({data,driveRef,onLists,onDrill}){
+  const calls=data?.callgridCalls||[];
+  const [view,setView]=useState("now");
+  const [cat,setCat]=useState("All");
+  const [tick,setTick]=useState(0);
+  const [showDone,setShowDone]=useState(false);
+  const [done,setDone]=useState(()=>{try{return JSON.parse(localStorage.getItem("nyala_pc_done")||"{}");}catch(e){return {};}});
+  const [refs,setRefs]=useState({dids:null,offers:null});
+  // DID + offer registries feed the Data check view
+  const loadRefs=React.useCallback(async()=>{
+    try{
+      const [dids,offers]=await Promise.all([
+        sb("GET","crm_dids?select=*").catch(()=>[]),
+        sb("GET","ob_campaigns?side=eq.buyer&select=crm_id,name,account_name,rate,billable_duration,offer_status").catch(()=>[]),
+      ]);
+      setRefs({dids:dids||[],offers:offers||[]});
+    }catch(e){setRefs({dids:[],offers:[]});}
+  },[]);
+  useEffect(()=>{loadRefs();},[loadRefs]);
+  // the clock moves even when no new calls arrive
+  useEffect(()=>{const t=setInterval(()=>{if(document.visibilityState==="visible")setTick(x=>x+1);},60000);return()=>clearInterval(t);},[]);
+  useEffect(()=>{if(driveRef)driveRef.current=m=>{
+    if(!m)return;
+    if(m.refresh){loadRefs();setTick(x=>x+1);return;}
+    if(m.view)setView(m.view);
+    if(m.cat)setCat(m.cat);
+  };},[driveRef,loadRefs]);
+
+  const now=React.useMemo(()=>new Date(),[tick,calls]);
+  const {D,R}=React.useMemo(()=>pcReports(calls,now),[calls,now]);
+  const nowList=React.useMemo(()=>PC_RULES.buildNow(R,now),[R,now]);
+  const weekList=React.useMemo(()=>PC_RULES.buildRecs(R),[R]);
+  const summary=React.useMemo(()=>PC_RULES.buildSummary(R,nowList),[R,nowList]);
+  useEffect(()=>{if(onLists)onLists({now:nowList,week:weekList});},[nowList,weekList,onLists]);
+
+  const {money,pct,n0,hourLabel}=PC_RULES;
+  const markDone=k=>{const nv={...done,[k]:done[k]?undefined:new Date().toISOString()};Object.keys(nv).forEach(x=>nv[x]===undefined&&delete nv[x]);setDone(nv);try{localStorage.setItem("nyala_pc_done",JSON.stringify(nv));}catch(e){}};
+  const fmtD=d=>new Date(d+"T12:00:00Z").toLocaleDateString("en-US",{month:"short",day:"numeric",timeZone:"UTC"});
+  const delta=(a,b)=>b>0?<span style={{color:a>=b?C.green:C.red}}>{a>=b?"+":"−"}{Math.abs(Math.round((a/b-1)*100))}%</span>:null;
+  const kpi=(label,val,sub,hl)=><div style={{...card,flex:1,minWidth:170,padding:"14px 16px",border:`1px solid ${hl?C.accent:C.border}`}}>
+    <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.08em",textTransform:"uppercase",color:C.sub,marginBottom:6}}>{label}</div>
+    <div style={{fontSize:24,fontWeight:700,...mono,color:C.text}}>{val}</div>
+    <div style={{fontSize:11.5,color:C.sub,marginTop:4}}>{sub}</div></div>;
+  const chip=(t,c)=><span style={{fontSize:10.5,fontWeight:600,color:c,background:c+"1F",border:`1px solid ${c}55`,borderRadius:5,padding:"1px 7px"}}>{t}</span>;
+  const catColor=c=>({"Compliance":C.red,"Call a pub":C.accent,"Call a buyer":C.teal,"Fix routing":C.amber,"Renegotiate":C.purple,"Stop a loss":C.red}[c]||C.sub);
+  const recCard=(r,mode)=>{
+    const isDone=!!done[r.key];
+    if(isDone&&!showDone)return null;
+    const val=mode==="now"?(r.risk?"Risk":money(r.perHour||0)+"/hr"):(r.risk?"Risk":r.impact>0?money(r.impact)+"/wk":"");
+    return <div key={r.key} style={{...card,padding:"12px 16px",marginBottom:10,borderLeft:`4px solid ${r.risk||r.sev==="high"?C.red:r.sev==="med"?C.amber:C.border}`,opacity:isDone?0.55:1}}>
+      <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+        <div style={{flex:1}}>
+          <div style={{display:"flex",gap:6,marginBottom:5,flexWrap:"wrap"}}>{chip(r.cat,catColor(r.cat))}{r.sev&&chip(r.sev==="high"?"High":r.sev==="med"?"Medium":"Low",r.sev==="high"?C.red:r.sev==="med"?C.amber:C.sub)}</div>
+          <div onClick={()=>onDrill&&onDrill(r.title)} title="Open these calls" style={{fontSize:14,fontWeight:700,color:C.text,cursor:onDrill?"pointer":"default"}}>{r.title}</div>
+        </div>
+        {val&&<div style={{textAlign:"right"}}><div style={{fontSize:15,fontWeight:700,color:r.risk?C.red:C.green,...mono}}>{val}</div><div style={{fontSize:10,color:C.dim}}>{mode==="now"?"act now":"per week"}</div></div>}
+      </div>
+      {r.why&&<div style={{fontSize:12.5,color:C.sub,margin:"6px 0 8px",lineHeight:1.5}}>{r.why}</div>}
+      {(r.fix||r.todo)&&<div style={{fontSize:12.5,color:C.text,background:C.green+"14",border:`1px solid ${C.green}40`,borderRadius:7,padding:"8px 11px",lineHeight:1.5}}>
+        <span style={{color:C.green,fontWeight:700,marginRight:6}}>{mode==="now"?"Fix now":"To do"}</span>{r.fix||r.todo}</div>}
+      <Btn outline color={isDone?C.green:C.sub} onClick={()=>markDone(r.key)} style={{marginTop:8,padding:"3px 11px",fontSize:11.5}}>{isDone?"✓ Done — undo":"Mark done"}</Btn>
+    </div>;
+  };
+
+  // hourly chart: bars = today, outline = usual (7-day avg), red = lost
+  const Chart=()=>{
+    const hs=summary.hours||[];
+    if(!hs.length)return <div style={{fontSize:12,color:C.dim,padding:"30px 0",textAlign:"center"}}>No calls yet today.</div>;
+    const W=520,Hh=170,pad=26,bw=(W-pad)/hs.length;
+    const max=Math.max(5,...hs.map(h=>Math.max(h.today,h.usual)));
+    const y=v=>Hh-(v/max)*(Hh-14);
+    return <svg viewBox={`0 0 ${W} ${Hh+18}`} style={{width:"100%",height:"auto"}}>
+      {[0,.5,1].map(f=><g key={f}><line x1={pad} x2={W} y1={y(max*f)} y2={y(max*f)} stroke={C.border}/><text x={0} y={y(max*f)+3} fontSize="9" fill={C.dim}>{Math.round(max*f)}</text></g>)}
+      {hs.map((h,i)=>{const x=pad+i*bw+bw*0.15,w=bw*0.7;return <g key={h.h}>
+        <rect x={x} y={y(h.usual)} width={w} height={Hh-y(h.usual)} fill="none" stroke={C.sub} strokeDasharray="3 2"/>
+        <rect x={x+w*0.15} y={y(h.today)} width={w*0.7} height={Hh-y(h.today)} fill={C.accent} rx="2"/>
+        {h.lost>0&&<rect x={x+w*0.15} y={y(h.lost)} width={w*0.7} height={Hh-y(h.lost)} fill={C.red} rx="2"/>}
+        {i%2===0&&<text x={x+w/2} y={Hh+13} fontSize="9" fill={C.dim} textAnchor="middle">{hourLabel(h.h).replace(" AM","a").replace(" PM","p")}</text>}
+      </g>;})}
+    </svg>;
+  };
+
+  // pubs right now: last 2 hours vs usual, like Ryan's board
+  const {H,frac}=PC_RULES.clock(now);
+  const board=(R.pubHourToday||[]).map(p=>{
+    const w=PC_RULES.win(p,H),u=PC_RULES.usual((R.pubHourPrior||[]).find(x=>x.name===p.name),H,frac);
+    const td=(R.pubToday||[]).find(x=>x.name===p.name)||{};
+    const st=td.profit<0?["Losing money",C.amber]:u.calls>=3&&w.calls>=u.calls*1.5?["Surging",C.green]:u.calls>=3&&w.calls<=u.calls*0.5?["Quiet",C.red]:["Normal",C.sub];
+    return {name:p.name,live:td.live||0,last2:w.calls,usual:Math.round(u.calls),lost:w.lost,today:td.calls||0,st};
+  }).sort((a,b)=>b.today-a.today);
+
+  // Nyala data checks: is every call attributed, priced and costed?
+  const checks=React.useMemo(()=>{
+    const out=[];const push=(group,check,ok,detail)=>out.push({group,check,ok,detail});
+    const wk=calls.filter(c=>String(c.date||"")>=D.wkStart);
+    const dids=refs.dids||[],offers=refs.offers||[];
+    const dg=x=>String(x||"").replace(/\D/g,"").slice(-10);
+    const didSet=new Set(dids.map(d=>dg(d.did)));
+    const unmatched=wk.filter(c=>c.destination_number&&!didSet.has(dg(c.destination_number)));
+    const unNums=[...new Set(unmatched.map(c=>dg(c.destination_number)))];
+    push("Attribution","Every DID in recent calls is in HubSpot",!unNums.length,unNums.length?`${unmatched.length} calls in the last 7 days went to ${unNums.length} number${unNums.length>1?"s":""} with no DID record: ${unNums.map(n=>`(${n.slice(0,3)}) ${n.slice(3,6)}-${n.slice(6)}`).join(", ")}. Add them as DIDs in HubSpot linked to a Buyer Offer.`:"Every destination number in the last 7 days has a DID record.");
+    const noOffer=dids.filter(d=>!d.buyer_offer_crm_id);
+    push("Attribution","Every DID is linked to a Buyer Offer",!noOffer.length,noOffer.length?`${noOffer.length} DID${noOffer.length>1?"s have":" has"} no Buyer Offer: ${noOffer.map(d=>d.did).join(", ")}.`:`${dids.length} DID${dids.length===1?"":"s"}, all linked.`);
+    const noRate=offers.filter(o=>!(Number(o.rate)>0));
+    push("Pricing","Every Buyer Offer has a rate",!noRate.length,noRate.length?`${noRate.length} offer${noRate.length>1?"s have":" has"} no rate, so their calls earn $0: ${noRate.map(o=>o.name).join(", ")}.`:`${offers.length} offer${offers.length===1?"":"s"}, all priced.`);
+    const noDur=offers.filter(o=>!(Number(o.billable_duration)>0));
+    push("Pricing","Every Buyer Offer has a billable duration",!noDur.length,noDur.length?`${noDur.length} offer${noDur.length>1?"s have":" has"} no billable duration; every connected call on ${noDur.length>1?"them":"it"} counts as billable: ${noDur.map(o=>o.name).join(", ")}.`:"All offers have a billable duration.");
+    const unattrib=wk.filter(c=>!c.buyer_offer_crm_id);
+    push("Attribution","Calls are attributed to a buyer",!unattrib.length,unattrib.length?`${unattrib.length} of ${wk.length} calls in the last 7 days have no buyer offer yet, so they show cost but no revenue.`:`All ${wk.length} calls in the last 7 days are attributed.`);
+    const costNoRev=wk.filter(c=>c.buyer_offer_crm_id&&Number(c.payout)>0&&!(Number(c.revenue)>0)&&c.billable);
+    push("Money","Billable calls with partner cost also earn revenue",!costNoRev.length,costNoRev.length?`${costNoRev.length} billable calls cost ${money(costNoRev.reduce((s,c)=>s+Number(c.payout||0),0))} but earned nothing: the buyer's billable duration is longer than these calls. Check the offer's duration against the partner's.`:"Every billable call with a partner cost also has revenue.");
+    const tw=(R.pubWeek||[]).reduce((s,r)=>s+r.calls,0),tb=(R.buyerWeek||[]).reduce((s,r)=>s+r.calls,0);
+    push("Totals","Publisher and buyer views agree",tw===tb,`${tw} calls by publisher vs ${tb} by buyer for the last 7 days.`);
+    return out;
+  },[calls,refs,D,R]);
+
+  const cats=["All",...[...new Set(weekList.map(r=>r.cat))]];
+  const weekShown=weekList.filter(r=>cat==="All"||r.cat===cat);
+  const wkProfit=(R.pubWeek||[]).reduce((s,r)=>s+r.profit,0),prProfit=(R.pubPrior||[]).reduce((s,r)=>s+r.profit,0);
+  const wkRev=(R.pubWeek||[]).reduce((s,r)=>s+r.rev,0);
+  const wkLost=(R.pubWeek||[]).reduce((s,r)=>s+r.noRoute+r.noAnswer+r.busy,0),wkCalls=(R.pubWeek||[]).reduce((s,r)=>s+r.calls,0);
+  const opp=weekList.reduce((s,r)=>s+(r.impact||0),0);
+  const tab=(id,l)=><button onClick={()=>setView(id)} style={{background:"none",border:"none",borderBottom:`2px solid ${view===id?C.accent:"transparent"}`,color:view===id?C.text:C.sub,fontWeight:view===id?700:500,fontSize:14,padding:"8px 14px",cursor:"pointer"}}>{l}</button>;
+  const th={textAlign:"left",fontSize:10.5,color:C.sub,fontWeight:600,padding:"6px 8px",borderBottom:`1px solid ${C.border}`};
+  const td2={fontSize:12.5,padding:"7px 8px",borderBottom:`1px solid ${C.border}`,color:C.text};
+
+  return <div style={{marginTop:6}}>
+    <div style={{display:"flex",alignItems:"baseline",gap:12,flexWrap:"wrap"}}>
+      <div style={{fontSize:18,fontWeight:700,color:C.text}}>Nyala Profit Coach</div>
+      <div style={{fontSize:12,color:C.sub}}>Last 7 days: {fmtD(D.wkStart)} – {fmtD(D.wkEnd)} · compared with {fmtD(D.prStart)} – {fmtD(D.prEnd)} · today {fmtD(D.today)}</div>
+      <div style={{marginLeft:"auto",fontSize:11.5,color:C.dim}}>Live from synced calls · updates every minute</div>
+    </div>
+    <div style={{display:"flex",gap:4,borderBottom:`1px solid ${C.border}`,margin:"8px 0 14px"}}>{tab("now","Right now")}{tab("week","This week")}{tab("check","Data check")}</div>
+
+    {view==="now"&&<div>
+      <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:12}}>
+        {kpi("Calls live now",n0(summary.live),`${n0(summary.calls_today)} calls today so far`)}
+        {kpi("Calls, last 2 hours",n0(summary.calls_2h),<span>{delta(summary.calls_2h,summary.usual_2h)} vs usual {n0(summary.usual_2h)}</span>)}
+        {kpi("Lost, last 2 hours",n0(summary.lost_2h),summary.calls_2h?`${pct(summary.lost_2h/summary.calls_2h)} of calls: no buyer, no answer or busy`:"no calls in the window")}
+        {kpi("Profit today",money(summary.profit_today),<span>{delta(summary.profit_today,summary.usual_profit_by_now)} vs usual {money(summary.usual_profit_by_now)} by now</span>)}
+        {kpi("Fix these now",money(summary.fix_now_per_hour)+"/hr",`${summary.fix_now_count} action${summary.fix_now_count===1?"":"s"} · ${summary.compliance_count} compliance`,true)}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1.25fr) minmax(0,1fr)",gap:12}}>
+        <div style={card}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}><div style={{fontSize:14,fontWeight:700}}>Immediate actions, ranked by profit per hour</div><div style={{fontSize:11.5,color:C.dim}}>last 2 hours, Eastern</div></div>
+          {nowList.length?nowList.map(r=>recCard(r,"now")):<div style={{fontSize:12.5,color:C.green,padding:"14px 0"}}>✓ Nothing needs fixing right now.</div>}
+          {nowList.some(r=>done[r.key])&&<label style={{fontSize:11.5,color:C.sub,display:"flex",gap:6,alignItems:"center"}}><input type="checkbox" checked={showDone} onChange={e=>setShowDone(e.target.checked)}/>Show done</label>}
+        </div>
+        <div>
+          <div style={{...card,marginBottom:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}><div style={{fontSize:14,fontWeight:700}}>Calls by hour, today vs usual</div>
+              <div style={{fontSize:10.5,color:C.sub,display:"flex",gap:10}}><span><span style={{color:C.accent}}>■</span> Today</span><span>▢ Usual (7-day avg)</span><span><span style={{color:C.red}}>■</span> Lost</span></div></div>
+            <Chart/>
+          </div>
+          <div style={card}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}><div style={{fontSize:14,fontWeight:700}}>Publishers right now</div><div style={{fontSize:11.5,color:C.dim}}>last 2 hours vs usual</div></div>
+            {board.length?<table style={{width:"100%",borderCollapse:"collapse"}}><thead><tr>{["Publisher","Live","Last 2h","Usual","Lost","Today",""].map(h=><th key={h} style={th}>{h}</th>)}</tr></thead>
+              <tbody>{board.map(b=><tr key={b.name}><td style={td2}>{b.name}</td><td style={td2}>{b.live||""}</td><td style={td2}>{b.last2}</td><td style={td2}>{b.usual}</td><td style={td2}>{b.lost||""}</td><td style={td2}>{b.today}</td><td style={td2}>{chip(b.st[0],b.st[1])}</td></tr>)}</tbody></table>
+              :<div style={{fontSize:12,color:C.dim}}>No calls yet today.</div>}
+          </div>
+        </div>
+      </div>
+    </div>}
+
+    {view==="week"&&<div>
+      <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:12}}>
+        {kpi("Profit, last 7 days",money(wkProfit),<span>{delta(wkProfit,prProfit)} vs {money(prProfit)} the week before</span>)}
+        {kpi("Margin",wkRev>0?pct(wkProfit/wkRev):"—",`on ${money(wkRev)} revenue`)}
+        {kpi("Profit today",money(summary.profit_today),`${n0(summary.calls_today)} calls`)}
+        {kpi("Lost calls",n0(wkLost),wkCalls?`${pct(wkLost/wkCalls)} of ${n0(wkCalls)} calls`:"no calls")}
+        {kpi("Opportunity",money(opp)+"/wk",`${weekList.length} recommendation${weekList.length===1?"":"s"}`,true)}
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12,alignItems:"center"}}>
+        {cats.map(c=>{const n=c==="All"?weekList.length:weekList.filter(r=>r.cat===c).length;return <button key={c} onClick={()=>setCat(c)} style={{background:cat===c?C.accent:C.surface,color:cat===c?C.accentFg:C.text,border:`1px solid ${cat===c?C.accent:C.border}`,borderRadius:16,padding:"4px 12px",fontSize:12,cursor:"pointer"}}>{c} <b>{n}</b></button>;})}
+        <label style={{marginLeft:"auto",fontSize:11.5,color:C.sub,display:"flex",gap:6,alignItems:"center"}}><input type="checkbox" checked={showDone} onChange={e=>setShowDone(e.target.checked)}/>Show done ({weekList.filter(r=>done[r.key]).length})</label>
+      </div>
+      {weekShown.length?weekShown.map(r=>recCard(r,"week")):<div style={{...card,fontSize:12.5,color:C.green}}>✓ No recommendations{cat!=="All"?` in ${cat}`:""} this week.</div>}
+    </div>}
+
+    {view==="check"&&<div style={card}>
+      <div style={{fontSize:12.5,color:C.sub,marginBottom:10}}>Checks that the coach's numbers can be trusted: every call matched to a DID and buyer offer, every offer priced, and the totals consistent. {checks.filter(c=>c.ok).length} of {checks.length} pass.</div>
+      {checks.map((c,i)=><div key={i} style={{display:"flex",gap:10,padding:"8px 0",borderBottom:`1px solid ${C.border}`}}>
+        <span style={{color:c.ok?C.green:C.red,fontWeight:700,width:18}}>{c.ok?"✓":"✗"}</span>
+        <div><div style={{fontSize:13,fontWeight:600,color:C.text}}>{c.check} <span style={{fontSize:10.5,color:C.dim,fontWeight:500,marginLeft:6}}>{c.group}</span></div>
+          <div style={{fontSize:12,color:C.sub,marginTop:2,lineHeight:1.5}}>{c.detail}</div></div>
+      </div>)}
+    </div>}
+  </div>;
+}
+
 // ── Multi-format dispo file support ──────────────────────────────────────
 // Normalizes each known client disposition format into the canonical row
 // shape dispo-ingest expects: {phone, created_at, direction, result,
@@ -14194,6 +17777,9 @@ function CashFlow({clients,publishers,clientCampaigns,publisherCampaigns,callgri
 //   C  CTV tracking workbook (XLSX)      — XCEL (one tab per month,
 //      date section rows, Closed=1 = sale; dates only, so lead times are
 //      backfilled from CallGrid by dispo-ingest)
+//   D  Billable calls + paid sales workbook (XLSX) — VBPO-style ACA buyers:
+//      a per-call billable tab and a sales tab, joined by the client's own
+//      Call ID so a sold call imports as one row
 // Minimal .xlsx reader: the file is a zip — central directory walked by
 // hand, entries inflated with the browser's DecompressionStream, sheet XML
 // parsed with DOMParser. Values only (shared strings + inline + numbers).
@@ -14228,6 +17814,133 @@ async function _xlsxInflate(entry){
   if(entry.method===0)return entry.comp;
   const stream=new Blob([entry.comp]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
   return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+// ── PDF disposition reports (ReportLab-style, e.g. the Medicare CTV report):
+// no library needed — ASCII85 + zlib decode via DecompressionStream, text
+// positioned from the content stream, rows rebuilt from the Caller ID table
+// by column x-positions with nearest-row assignment (handles wrapped cells
+// and vertically centered rows). The report date comes from the header.
+function _a85decode(str){
+  const s=str.replace(/\s+/g,"").replace(/~>$/,"");
+  const out=[];let i=0;
+  while(i<s.length){
+    if(s[i]==="z"){out.push(0,0,0,0);i++;continue;}
+    const chunk=s.slice(i,i+5);i+=5;
+    const pad=5-chunk.length;
+    const c=chunk+"u".repeat(pad);
+    let n=0;for(let j=0;j<5;j++)n=n*85+(c.charCodeAt(j)-33);
+    const b=[(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255];
+    out.push(...b.slice(0,4-pad));
+  }
+  return new Uint8Array(out);
+}
+async function _inflateZlib(bytes){
+  const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+function _pdfTextFrags(content){
+  const frags=[];
+  const stack=[];let off={x:0,y:0};
+  let tx=0,ty=0,lx=0,ly=0,leading=0,pending=null;
+  const nums=[];
+  const unesc=s=>s.slice(1,-1).replace(/\\([0-7]{1,3})/g,(m,o)=>String.fromCharCode(parseInt(o,8))).replace(/\\n/g,"\n").replace(/\\r/g,"\r").replace(/\\t/g,"\t").replace(/\\(.)/g,"$1");
+  const toks=content.match(/\((?:\\.|[^\\()])*\)|\[(?:\\.|[^\]])*\]|[-.]?\d[-.\d]*|[A-Za-z']{1,3}\*?/g)||[];
+  for(const t of toks){
+    if(/^[-.]?\d/.test(t)){nums.push(Number(t));continue;}
+    if(t.startsWith("(")){pending=unesc(t);nums.length=0;continue;}
+    if(t.startsWith("[")){pending=(t.match(/\((?:\\.|[^\\()])*\)/g)||[]).map(unesc).join("");nums.length=0;continue;}
+    switch(t){
+      case "q":stack.push({...off});break;
+      case "Q":off=stack.pop()||{x:0,y:0};break;
+      case "cm":{const n=nums.slice(-6);if(n.length===6){off={x:off.x+n[4],y:off.y+n[5]};}break;}
+      case "BT":tx=ty=lx=ly=0;break;
+      case "Tm":{const n=nums.slice(-6);if(n.length===6){lx=n[4];ly=n[5];tx=lx;ty=ly;}break;}
+      case "Td":{const n=nums.slice(-2);lx+=n[0]||0;ly+=n[1]||0;tx=lx;ty=ly;break;}
+      case "TD":{const n=nums.slice(-2);leading=-(n[1]||0);lx+=n[0]||0;ly+=n[1]||0;tx=lx;ty=ly;break;}
+      case "TL":leading=nums[nums.length-1]||0;break;
+      case "T*":ly-=leading;tx=lx;ty=ly;break;
+      case "'":ly-=leading;tx=lx;ty=ly;if(pending){frags.push({x:off.x+tx,y:off.y+ty,s:pending});pending=null;}break;
+      case "Tj":case "TJ":if(pending){frags.push({x:off.x+tx,y:off.y+ty,s:pending});pending=null;}break;
+      default:break;
+    }
+    nums.length=0;
+  }
+  return frags;
+}
+async function readPdfPagesText(buf){
+  const bytes=new Uint8Array(buf);
+  let bin="";for(let i=0;i<bytes.length;i+=65536)bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+65536));
+  const pages=[];
+  const re=/<<([^]*?)>>\s*stream\r?\n/g;let m;
+  while((m=re.exec(bin))){
+    const dict=m[1],start=re.lastIndex,end=bin.indexOf("endstream",start);
+    if(end<0)break;
+    let data=bytes.subarray(start,end);
+    try{
+      if(/ASCII85Decode/.test(dict)){let txt="";for(let i=0;i<data.length;i++)txt+=String.fromCharCode(data[i]);data=_a85decode(txt.trim());}
+      if(/FlateDecode/.test(dict))data=await _inflateZlib(data);
+      let content="";for(let i=0;i<data.length;i+=65536)content+=String.fromCharCode.apply(null,data.subarray(i,i+65536));
+      if(!/\b(Tj|TJ)\b/.test(content))continue;
+      pages.push(_pdfTextFrags(content));
+    }catch(_e){/* skip */}
+  }
+  return pages;
+}
+function normalizeDispoPdf(pages){
+  const clean=s=>String(s||"").replace(/[\x91\x92]/g,"'").replace(/[\x93\x94]/g,'"').replace(/[\x96\x97]/g,"-").replace(/\s+/g," ").trim();
+  let dateStr=null;
+  for(const p of pages){for(const f of p){
+    const m=/([A-Z][a-z]{2})[a-z]* (\d{1,2}), (\d{4})/.exec(f.s);
+    if(m){const MO={Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12}[m[1]];if(MO){dateStr=`${MO}/${Number(m[2])}/${m[3]}`;break;}}
+  }if(dateStr)break;}
+  const rows=[];let salesN=0;
+  for(const frags of pages){
+    const names=["Caller ID","Time (ET)","State","Disposition","Dur.","Billing","Note"];
+    const hdrIdx=frags.filter(f=>names.includes(f.s.trim()));
+    if(hdrIdx.length<4)continue;
+    const hy=Math.max(...hdrIdx.map(f=>f.y));
+    const cols=names.map(n=>{const f=frags.find(g=>Math.abs(g.y-hy)<3&&g.s.trim()===n);return f?f.x:null;});
+    if(cols[0]==null||cols[5]==null)continue;
+    const colOf=x=>{let best=0,bd=1e9;for(let i=0;i<cols.length;i++){if(cols[i]==null)continue;const d=Math.abs(x-cols[i]);if(d<bd){bd=d;best=i;}}return best;};
+    const body=frags.filter(f=>f.y<hy-3&&!/^Omnisure|^Page \d|^Appendix|^Calls marked/.test(f.s));
+    const ids=body.filter(f=>colOf(f.x)===0&&f.s.replace(/\D/g,"").length>=10).sort((a,b)=>b.y-a.y);
+    if(!ids.length)continue;
+    const minIdY=Math.min(...ids.map(f=>f.y));
+    const rws=ids.map(f=>({idY:f.y,cells:[f.s,"","","","","",""]}));
+    for(const f of body){
+      if(f.y<minIdY-16)continue; // below the last row = footer junk
+      const ci=colOf(f.x);
+      if(ci===0&&f.s.replace(/\D/g,"").length>=10)continue; // the ids themselves
+      let best=null,bd=1e9;
+      for(const r of rws){const d=Math.abs(f.y-r.idY);if(d<bd){bd=d;best=r;}}
+      if(!best||bd>14)continue; // not near any row band
+      // keep reading order inside the cell: higher y first, then x
+      best.cells[ci]=best.cells[ci]?best.cells[ci]+" "+f.s:f.s;
+    }
+    for(const r of rws){
+      const [id,tm,st,dispoRaw,dur,billing,note]=r.cells.map(clean);
+      const ph=id.replace(/\D/g,"");
+      const t=/(\d{1,2}):(\d{2})\s*(AM|PM)/i.exec(tm);
+      if(ph.length<10||!t)continue;
+      const dispo=dispoRaw.replace(/\s*\*\s*$/,"").replace(/\s*\*\s/," ").trim();
+      const isSale=/^sale\b/i.test(dispo);
+      if(isSale)salesN++;
+      rows.push({
+        phone:"+1"+ph.slice(-10),
+        created_at:dateStr?`${dateStr} ${Number(t[1])}:${t[2]}:00 ${t[3].toUpperCase()}`:null,
+        direction:"Incoming",
+        result:`${dispo||"(no disposition)"}${dur?` (${dur}${billing&&!/^billable$/i.test(billing)?`, ${billing}`:""})`:""}${note?`; ${note}`:""}`,
+        result_category:isSale?"SUCCESS":"",
+        sales:isSale?1:0,
+        state:/^[A-Z]{2}$/.test(st)?st:null,
+        queue:null,
+      });
+    }
+  }
+  if(!rows.length)return null;
+  const seen=new Set();const ded=[];
+  for(const r of rows){const k=`${r.phone}|${r.created_at}`;if(!seen.has(k)){seen.add(k);ded.push(r);}}
+  return {format:`PDF disposition report${dateStr?` (${dateStr})`:""} — ${salesN} sale${salesN===1?"":"s"}`,rows:ded,used:[`caller tables (${ded.length})`],skipped:[]};
 }
 async function readXlsxSheets(buf){
   const entries=await _xlsxUnzip(buf);
@@ -14292,6 +18005,33 @@ function normalizeDispoGrid(grid){
         state:col(r,"Lead State"),queue:col(r,"Queue")};
     })};
   }
+  // VICIdial-style dialer export: call_date / status / status_name / length_in_sec.
+  // SALE status code = sale; WN and DNC are trash. call_date is taken as the
+  // dialer's own clock (one server timezone); vendor_lead_code carries the TFN.
+  if(idx["call_date"]!=null&&idx["status_name"]!=null&&(idx["phone_number_dialed"]!=null||idx["phone_number"]!=null)){
+    const TRASH=new Set(["WN","DNC"]);
+    const fmtDT=v=>{
+      if(typeof v==="number"&&v>40000){const d=new Date(Math.round((v-25569)*86400000));
+        let h=d.getUTCHours();const ap=h>=12?"PM":"AM";h=h%12||12;
+        return `${d.getUTCMonth()+1}/${d.getUTCDate()}/${d.getUTCFullYear()} ${h}:${String(d.getUTCMinutes()).padStart(2,"0")}:${String(d.getUTCSeconds()).padStart(2,"0")} ${ap}`;}
+      return String(v||"").trim()||null;
+    };
+    const rows2=grid.slice(1).map(r=>{
+      const ph=digitsOf(col(r,"phone_number_dialed")||col(r,"phone_number"));
+      if(ph.length<10)return null;
+      const code=String(col(r,"status")||"").trim().toUpperCase();
+      const name=String(col(r,"status_name")||"").trim();
+      const len=Number(col(r,"length_in_sec"))||0;
+      const sale=code==="SALE";
+      const tfn=digitsOf(col(r,"vendor_lead_code"));
+      return {phone:"+1"+ph.slice(-10),created_at:fmtDT(col(r,"call_date")),direction:"Incoming",
+        result:`${name||code||"(no status)"}${len?` (${Math.floor(len/60)}:${String(len%60).padStart(2,"0")})`:""}`,
+        result_category:sale?"SUCCESS":(TRASH.has(code)?"TRASH":""),
+        sales:sale?1:0,
+        queue:tfn.length>=10?`TFN ${tfn.slice(-10)}`:null};
+    }).filter(Boolean);
+    return {format:`Dialer dispo export (status codes; ${rows2.filter(r=>r.sales>0).length} sales)`,rows:rows2};
+  }
   if(idx["Phone Number"]!=null&&idx["Date Created"]!=null&&(idx["Status"]!=null||idx["Status Name"]!=null)){
     const TRASH=new Set(["NOTQ","DNC","CLIENT","CMSDRP"]); // not qualified / do-not-call / already a client / CMS drop
     return {format:"Dialer lead export",rows:grid.slice(1).map(r=>{
@@ -14310,6 +18050,154 @@ function normalizeDispoWorkbook(sheets){
   const rows=[];const used=[];const skipped=[];
   const digitsOf=s=>String(s||"").replace(/\D/g,"");
   const serialToMDY=n=>{const d=new Date(Math.round((n-25569)*86400000));return `${d.getUTCMonth()+1}/${d.getUTCDate()}/${d.getUTCFullYear()}`;};
+  // ── The CSV formats arriving as an .xlsx sheet (EnrollHere call export,
+  //    dialer lead export): same detectors, per sheet, before anything else ──
+  for(const sh of sheets){
+    const g=normalizeDispoGrid(sh.rows||[]);
+    if(g&&g.rows.length)return {...g,used:[`${sh.name} (${g.rows.length})`],skipped:sheets.filter(s2=>s2!==sh).map(s2=>s2.name)};
+  }
+  // ── Format D: "Billable calls" + "Paid sales" workbook (VBPO-style) ──
+  const hdrMap=row=>{const m={};(row||[]).forEach((v,i)=>{const k=String(v??"").trim().toLowerCase();if(k&&m[k]==null)m[k]=i;});return m;};
+  const billSh=sheets.find(sh=>{const m=hdrMap(sh.rows[0]);return m["call date (et)"]!=null&&m["caller phone"]!=null&&m["call length (seconds)"]!=null;});
+  const paidSh=sheets.find(sh=>{const m=hdrMap(sh.rows[0]);return m["sale date"]!=null&&m["caller phone"]!=null;});
+  if(billSh||paidSh){
+    const dRows=[];const dUsed=[];
+    const dtOf=(d,t)=>`${String(d??"").trim()} ${String(t??"").trim()}`.trim();
+    const saleById=new Map();const saleRows=[];
+    if(paidSh){
+      const m=hdrMap(paidSh.rows[0]);
+      for(const r of paidSh.rows.slice(1)){
+        const ph=digitsOf(m["caller phone"]!=null?r[m["caller phone"]]:null);
+        if(ph.length<10)continue;
+        const rate=String(m["rate ($)"]!=null?(r[m["rate ($)"]]??""):"").trim();
+        const row={phone:"+1"+ph.slice(-10),created_at:dtOf(r[m["call date (et)"]],m["call time (et)"]!=null?r[m["call time (et)"]]:""),direction:"Incoming",
+          result:`Sale${rate?` ($${rate})`:""}`,result_category:"SUCCESS",sales:1};
+        const id=String(m["call id"]!=null?(r[m["call id"]]??""):"").trim();
+        if(id)saleById.set(id,row);
+        saleRows.push({id,row});
+      }
+    }
+    const usedSale=new Set();
+    if(billSh){
+      const m=hdrMap(billSh.rows[0]);
+      let n=0;
+      for(const r of billSh.rows.slice(1)){
+        const ph=digitsOf(m["caller phone"]!=null?r[m["caller phone"]]:null);
+        if(ph.length<10)continue;
+        const id=String(m["call id"]!=null?(r[m["call id"]]??""):"").trim();
+        const len=String(m["call length (seconds)"]!=null?(r[m["call length (seconds)"]]??""):"").trim();
+        const rate=String(m["rate ($)"]!=null?(r[m["rate ($)"]]??""):"").trim();
+        if(id&&saleById.has(id)){
+          const sl=saleById.get(id);usedSale.add(id);
+          dRows.push({...sl,result:`Sale${rate?` ($${rate})`:""} — billable ${len}s call`});
+        }else{
+          dRows.push({phone:"+1"+ph.slice(-10),created_at:dtOf(r[m["call date (et)"]],m["call time (et)"]!=null?r[m["call time (et)"]]:""),direction:"Incoming",
+            result:`Billable call (${len}s${rate?` @ $${rate}`:""})`,result_category:"",sales:0});
+        }
+        n++;
+      }
+      dUsed.push(`${billSh.name} (${n})`);
+    }
+    let extraN=0;
+    for(const sr of saleRows){if(sr.id&&usedSale.has(sr.id))continue;dRows.push(sr.row);extraN++;}
+    if(paidSh)dUsed.push(`${paidSh.name} (${extraN} sales not in the billable tab)`);
+    return {format:"Billable + sales workbook",rows:dRows,used:dUsed,
+      skipped:sheets.filter(sh=>sh!==billSh&&sh!==paidSh).map(sh=>sh.name)};
+  }
+  // ── Format F: partner disposition report (Summary + Calls tabs; times in
+  //    Pacific → shifted to ET; Result "Sold" = sale, Policies = sale count,
+  //    carrier/premium kept in the result text) ──
+  const fSh=sheets.find(sh=>{const m=hdrMap(sh.rows[0]);return m["date and time (pacific)"]!=null&&m["caller number"]!=null&&m["result"]!=null;});
+  if(fSh){
+    const m=hdrMap(fSh.rows[0]);
+    const MO={jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+    const ptToEt=v=>{
+      let d=null;
+      if(typeof v==="number"){const u=new Date(Math.round((v-25569)*86400000));d=new Date(u.getUTCFullYear(),u.getUTCMonth(),u.getUTCDate(),u.getUTCHours(),u.getUTCMinutes(),0);}
+      else{
+        const s=String(v||"").trim();
+        const mm=/^([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4}),?\s+(\d{1,2}):(\d{2})\s*(AM|PM)$/i.exec(s);
+        if(!mm)return s||null;
+        let h=Number(mm[4])%12;if(/pm/i.test(mm[6]))h+=12;
+        d=new Date(Number(mm[3]),MO[mm[1].slice(0,3).toLowerCase()]??0,Number(mm[2]),h,Number(mm[5]),0);
+      }
+      d.setHours(d.getHours()+3); // PT → ET (both observe DST together)
+      let hh=d.getHours();const ap=hh>=12?"PM":"AM";hh=hh%12||12;
+      return `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()} ${hh}:${String(d.getMinutes()).padStart(2,"0")}:00 ${ap}`;
+    };
+    const fRows=[];let n=0,salesN=0;
+    for(const r of fSh.rows.slice(1)){
+      const ph=digitsOf(m["caller number"]!=null?r[m["caller number"]]:null);
+      if(ph.length<10)continue;
+      const val=k=>String(m[k]!=null?(r[m[k]]??""):"").trim();
+      const result=val("result");
+      const sold=/^sold$/i.test(result);
+      const sales=sold?Math.max(1,Math.round(Number(val("policies")))||0):0;
+      if(sold)salesN+=sales;
+      const bill=/^yes$/i.test(val("billable"));
+      const len=val("call length");
+      const saleBits=[val("annual premium")?`$${val("annual premium")} AP`:"",val("carrier")?`${val("carrier")}${val("plan")?" "+val("plan"):""}`:""].filter(Boolean).join(", ");
+      fRows.push({
+        phone:"+1"+ph.slice(-10),
+        created_at:ptToEt(m["date and time (pacific)"]!=null?r[m["date and time (pacific)"]]:null),
+        direction:"Incoming",
+        result:sold?`Sold${saleBits?` (${saleBits})`:""}`:`${result||"(no result)"}${bill?` (billable${len?` ${len}`:""})`:""}`,
+        result_category:sold?"SUCCESS":(/misdial/i.test(result)?"TRASH":""),
+        sales,
+        state:val("state")||null,
+        queue:val("campaign")||null,
+      });
+      n++;
+    }
+    return {format:`Partner disposition report (Pacific times shifted to ET; ${salesN} sale${salesN===1?"":"s"})`,rows:fRows,
+      used:[`${fSh.name} (${n})`],skipped:sheets.filter(sh=>sh!==fSh).map(sh=>sh.name)};
+  }
+  // ── Format E: partner dispo tracker (Pub ID / Disposition / Talk Time).
+  //    Times come in MT → converted to ET so phone+time matching lines up.
+  //    "Sale only (no inbound dispo)" rows carry a sale with no call time. ──
+  const trkSh=sheets.find(sh=>{const m=hdrMap(sh.rows[0]);return m["pub id"]!=null&&m["caller phone"]!=null&&m["disposition"]!=null;});
+  if(trkSh){
+    const m=hdrMap(trkSh.rows[0]);
+    const timeKey=Object.keys(m).find(k=>k.startsWith("time"));
+    const soldKey=Object.keys(m).find(k=>k.includes("sold"));
+    const mtToEt=(dateStr,timeStr)=>{
+      const ds=typeof dateStr==="number"?serialToMDY(dateStr):String(dateStr||"").trim();
+      const t=String(timeStr||"").trim();
+      const tm=/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)$/i.exec(t);
+      const md=/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(ds);
+      if(!tm||!md)return ds||null;
+      let h=Number(tm[1])%12;if(/pm/i.test(tm[4]))h+=12;
+      const d=new Date(Number(md[3]),Number(md[1])-1,Number(md[2]),h,Number(tm[2]),0);
+      d.setHours(d.getHours()+2); // MT → ET
+      let hh=d.getHours();const ap=hh>=12?"PM":"AM";hh=hh%12||12;
+      return `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()} ${hh}:${String(d.getMinutes()).padStart(2,"0")}:00 ${ap}`;
+    };
+    const eRows=[];let n=0,salesN=0;
+    for(const r of trkSh.rows.slice(1)){
+      const ph=digitsOf(m["caller phone"]!=null?r[m["caller phone"]]:null);
+      if(ph.length<10)continue;
+      const dispo=String(m["disposition"]!=null?(r[m["disposition"]]??""):"").trim();
+      const talk=String(m["talk time"]!=null?(r[m["talk time"]]??""):"").trim();
+      const callType=String(m["call type"]!=null?(r[m["call type"]]??""):"").trim();
+      const soldTxt=String(soldKey?(r[m[soldKey]]??""):"").trim();
+      const sold=/sale|sold/i.test(soldTxt)||/^sold$/i.test(dispo);
+      const saleOnly=/sale only/i.test(callType);
+      if(sold)salesN++;
+      eRows.push({
+        phone:"+1"+ph.slice(-10),
+        created_at:mtToEt(m["date"]!=null?r[m["date"]]:null,timeKey&&m[timeKey]!=null?r[m[timeKey]]:""),
+        direction:"Incoming",
+        result:saleOnly?"Sold (reported sale, no inbound dispo)":`${dispo||"(no disposition)"}${talk&&!/^0:00:0\d$/.test(talk)?` (${talk} talk)`:""}`,
+        result_category:sold?"SUCCESS":"",
+        sales:sold?1:0,
+        state:String(m["state"]!=null?(r[m["state"]]??""):"").trim()||null,
+        queue:String(m["pub id"]!=null?(r[m["pub id"]]??""):"").trim()||null,
+      });
+      n++;
+    }
+    return {format:`Partner dispo tracker (MT times shifted to ET; ${salesN} sale${salesN===1?"":"s"})`,rows:eRows,
+      used:[`${trkSh.name} (${n})`],skipped:sheets.filter(sh=>sh!==trkSh).map(sh=>sh.name)};
+  }
   for(const sh of sheets){
     let hr=-1,ix=null;
     for(let i=0;i<Math.min(8,sh.rows.length);i++){
@@ -14370,6 +18258,7 @@ function dispoVert(campaign,queue){
   const c=String(campaign||"").toLowerCase();
   if(c.startsWith("medicare"))return "Medicare";
   if(c.startsWith("final expense"))return "FE";
+  if(c.startsWith("aca"))return "ACA";
   if(c)return "Other";
   const q=String(queue||"").trim().toLowerCase();return (/medicare/.test(q)||/(^|[\s_-])ma([\s_-]|$)/.test(q))?"Medicare":"FE";
 }
@@ -14384,8 +18273,7 @@ function Dispositions({clients,callgridCalls,user}){
   const [kalMap,setKalMap]=useState(new Map()); // inbound_call_id -> Kaliper AI analysis
   const [vertTab,setVertTab]=useState("FE");
   const etFmt=new Intl.DateTimeFormat("en-CA",{timeZone:"America/New_York",year:"numeric",month:"2-digit",day:"2-digit"});
-  const [start,setStart]=useState(()=>{const d=new Date();d.setDate(d.getDate()-13);return etFmt.format(d);});
-  const [end,setEnd]=useState(()=>etFmt.format(new Date()));
+  const [start,end,setStart,setEnd]=usePersistentRange("dispo_range",14);
   // upload state
   const fileRef=useRef(null);
   const [parsing,setParsing]=useState(false);
@@ -14426,16 +18314,25 @@ function Dispositions({clients,callgridCalls,user}){
     setParsing(true);setUploadMsg("");
     try{
       let norm=null;
-      if(/\.xlsx$/i.test(file.name)){
+      if(/\.pdf$/i.test(file.name)){
+        const pages=await readPdfPagesText(await file.arrayBuffer());
+        norm=normalizeDispoPdf(pages);
+        if(!norm)throw new Error("No caller table found in this PDF — expected a disposition report with a Caller ID / Disposition / Billing table (like the Medicare CTV report).");
+      }else if(/\.xlsx$/i.test(file.name)){
         const sheets=await readXlsxSheets(await file.arrayBuffer());
         norm=normalizeDispoWorkbook(sheets);
-        if(!norm.rows.length)throw new Error(`No usable rows found in the workbook${norm.skipped.length?` (tabs skipped: ${norm.skipped.join(", ")})`:""} — expected tabs with Phone # and Closed columns under date section rows.`);
+        if(!norm.rows.length)throw new Error(`No usable rows found in the workbook${norm.skipped.length?` (tabs skipped: ${norm.skipped.join(", ")})`:""} — supported: EnrollHere call export, dialer lead export, billable + sales workbook, partner dispo tracker (Pub ID), partner disposition report (Pacific times), or the CTV tracking workbook.`);
       }else{
         const text=await file.text();
         const grid=parseCsvText(text);
         if(grid.length<2)throw new Error("File looks empty.");
         norm=normalizeDispoGrid(grid);
-        if(!norm)throw new Error("Unrecognized disposition format — supported: EnrollHere call export (CSV), dialer lead export (CSV with Phone Number / Date Created / Status), or the CTV tracking workbook (.xlsx).");
+        if(!norm){
+          // workbook-style formats arriving as a CSV (partner tracker, VBPO)
+          const wb=normalizeDispoWorkbook([{name:file.name.replace(/\.csv$/i,""),rows:grid}]);
+          if(wb&&wb.rows.length)norm=wb;
+        }
+        if(!norm)throw new Error("Unrecognized disposition format — supported: EnrollHere call export (CSV), dialer lead export (CSV with Phone Number / Date Created / Status), the partner dispo tracker (Pub ID / Disposition / Talk Time), or the CTV tracking workbook (.xlsx).");
       }
       const preview=await callIngest({client_id:effClientId,filename:file.name,rows:norm.rows,dry_run:true});
       setPending({filename:file.name,rows:norm.rows,preview,format:norm.format,used:norm.used||null,skipped:norm.skipped||null,client_name:client?.name||""});
@@ -14464,7 +18361,8 @@ function Dispositions({clients,callgridCalls,user}){
     const d=String(l.first_call_date||"").slice(0,10);
     return d>=start&&d<=end;
   });
-  const verts=["FE","Medicare",...(billCalls.some(r=>dispoVert(r.campaign_name)==="Other")||leadsInRange.some(l=>dispoVert(l.campaign_name,l.queue)==="Other")?["Other"]:[])];
+  const hasVert=v=>billCalls.some(r=>dispoVert(r.campaign_name)===v)||leadsInRange.some(l=>dispoVert(l.campaign_name,l.queue)===v);
+  const verts=["FE","Medicare",...(hasVert("ACA")?["ACA"]:[]),...(hasVert("Other")?["Other"]:[])];
   const vt=verts.includes(vertTab)?vertTab:"FE";
   const vCalls=billCalls.filter(r=>dispoVert(r.campaign_name)===vt);
   const vLeads=leadsInRange.filter(l=>dispoVert(l.campaign_name,l.queue)===vt);
@@ -14685,7 +18583,7 @@ function Dispositions({clients,callgridCalls,user}){
         <span style={{color:C.sub,fontSize:12}}>to</span>
         <Input type="date" value={end} onChange={e=>setEnd(e.target.value)} style={{...inputStyle,width:140}}/>
         <Btn onClick={()=>fileRef.current?.click()} disabled={parsing||!effClientId}>{parsing?"Checking file…":"⇪ Upload Dispo File"}</Btn>
-        <input ref={fileRef} type="file" accept=".csv,.xlsx" style={{display:"none"}} onChange={onFile}/>
+        <input ref={fileRef} type="file" accept=".csv,.xlsx,.pdf" style={{display:"none"}} onChange={onFile}/>
       </div>
     </div>
     {!dLoading&&(()=>{ // coverage indicator: what dispo data exists for this client
@@ -15137,71 +19035,862 @@ function TVBillingView({tvCampaigns,networks,clients,clientCampaigns,tvApLedger,
     </div>;
   }
 
-// ── ALERT BELL — open-alert feed, pop-up toasts, acknowledge ──────────────
-function AlertBell({user}){
-  const [open,setOpen]=useState(false);
-  const [alerts,setAlerts]=useState([]);
-  const [toasts,setToasts]=useState([]);
-  const seenRef=React.useRef(null);
-  const [lastRun,setLastRun]=useState(null);
+// ── ALERTS — the alert center page, sidebar badge, and per-user email settings ──
+const BELL_TYPES=[
+  ["alert_buyer_accept","Buyer accept %"],
+  ["alert_publisher_pace","Publisher pace"],
+  ["alert_rpc_drop","RPC drop"],
+  ["alert_low_billable","Short calls"],
+  ["alert_volume_drop","Volume drop"],
+  ["alert_overdue_invoices","Overdue invoices"],
+  ["alert_launch","Launch with no calls"],
+  ["alert_noroute","No-route spikes"],
+  ["alert_pub_share","Pub behind usual share"],
+  ["alert_buyer_conversion","Buyer not converting"],
+  ["alert_losing_lane","Money-losing lanes"],
+  ["alert_nontv","Non-TV on TV campaigns"],
+  ["alert_promise","Free coverage promises"],
+  ["alert_transfer","Transfers on inbound"],
+  ["alert_deadair","Dead air (AI tag)"],
+  ["daily_brief","7 AM daily brief"],
+];
+// PLAYBOOKS — what each alert type really means, and what to do about it.
+const ALERT_PLAYBOOKS={
+  buyer_accept_rate:{means:"This buyer is accepting a much smaller share of our pings than its own 7-day normal. Usually their daily cap filled, budget ran out, or they paused or narrowed targeting.",steps:["Open Analysis → Pings & Bids and check their acceptance hour by hour to see when it dropped","Check the buyer's cap and concurrency in CallGrid","Message the buyer: capped, paused, or changed targeting?","If capped, point the freed traffic at the next-best lane for that vertical"]},
+  publisher_pace:{means:"This publisher campaign is behind the pace needed to hit its daily call target, adjusted for the time of day.",steps:["Check their hourly curve on State of the Union (Day view) to see if they started late or stopped mid-day","Ask the pub whether budget, creative or a traffic source changed","Check our side: schedule, caps or bid floors that could be rejecting their calls","If this volume is the new normal, lower the daily target so pacing reads true"]},
+  rpc_drop:{means:"Revenue per call on this campaign fell well below its 7-day average. Either cheaper buyers are winning the calls or billable durations got shorter.",steps:["Compare today's buyer mix vs last week (State of the Union drill-down on the campaign)","Check whether a premium buyer went quiet — Buyer shut-off board on the SOTU Day view","Look at durations: calls barely crossing or missing the billable mark","Confirm no rate change was entered in CallGrid or an IO"]},
+  low_billable_pct:{means:"Connected calls from this publisher are not lasting to the billable mark. That is the short-call / dead-air signature.",steps:["Pull 3 to 5 recordings of their short calls","Check Dispositions for dead-air counts on this pub","Ask the pub what changed in their sourcing or creative","If the pattern holds, ask for credit on the dead-air calls"]},
+  volume_drop:{means:"This campaign's billable calls are running well behind its 7-day pace.",steps:["Find which publisher fell off: Overview scoreboard or State of the Union drill-down","Confirm the campaign and its CallGrid link are still active","Ask the pub whether budget or creative rotation changed"]},
+  overdue_invoices:{means:"AR invoices or AP bills are past their due date above the alert threshold.",steps:["Open Billing and filter to Overdue","Chase the largest AR items first","Confirm any AP holds are intentional before paying"]},
+  launch_no_calls:{means:"A campaign past its launch date has not taken a single call. Something between the pub and routing is not connected.",steps:["Verify the CallGrid campaign link, DID and routing plan","Confirm the pub actually started sending (ask for dial logs)","Check rate and daily target are set so routing can engage","If the launch slipped, update the start date so this stops firing"]},
+  no_route_spike:{means:"A large share of this campaign's calls arrived with no buyer to take them. That is paid traffic with nowhere to go.",steps:["See which destinations should be catching these calls and check their caps and schedules","Full caps at peak hours are the usual cause — ask the likely buyer for a raise or re-open","Check bid floors: calls priced above what every buyer will pay also route nowhere","Consider a backstop buyer lane for overflow hours"]},
+  pub_share_behind:{means:"This publisher is far below what its share of the last 7 days predicts for today, even accounting for today's total volume.",steps:["Compare their hourly curve today vs usual (SOTU Day view)","Ask the pub whether budget, creative or a source changed","Check our schedules and caps are not rejecting them"]},
+  buyer_conversion:{means:"This buyer's billable rate collapsed vs its 7-day rate, or a buyer that usually takes calls has gone silent today.",steps:["Check Pings & Bids: are they still bidding and accepting?","Pull recordings: are calls reaching agents or dying in their queue?","Ask the buyer about staffing or queue changes today","If silent, confirm caps or pauses before re-routing the traffic"]},
+  losing_lane:{means:"For this campaign + publisher lane, what we paid the publisher today is more than what buyers paid us. Every call deepens the loss.",steps:["Compare the rate pair: pub cost vs buyer rate on this lane","Check duration mismatch: pub paid at a short mark while buyers bill at a longer one","Pause or reprice the lane if the mismatch is structural","If it looks like a one-day data issue (credits, chargebacks), flag to billing"]},
+  nontv_source:{means:"Calls tagged by AI as coming from non-TV sources (pop-ups, social, search) are arriving on a TV campaign. The pub may be mixing in cheaper traffic.",steps:["Open Analysis → Call Intelligence and review the flagged calls' transcripts and recordings","Ask the pub to account for their traffic sources on this campaign","Enforce TV-only terms or reprice the non-TV portion"]},
+  ad_promise:{means:"Callers are saying the ad promised free coverage, a benefit or grocery card, cash, or a government program. That is misleading-ad exposure with compliance risk, and these callers rarely convert.",steps:["Open Call Intelligence and read the flagged calls' transcripts; save the worst examples","Identify which creative or source the calls came from","Confront the pub with the examples and require the creative be pulled","Route around the source until it is fixed; document everything for the buyer side"]},
+  transfer_inbound:{means:"Callers on inbound-rate campaigns show transfer signs: they say we called them, say they were transferred, or another agent hands them over. Inbound rates are being paid for transferred traffic.",steps:["Open Call Intelligence and review the flagged transcripts","Check whether one source accounts for most of them","Reprice those calls at transfer rates or ask for credit","Watch whether the pattern stops after the conversation"]},
+  dead_air_insight:{means:"On this pub's connected calls over 30 seconds, the AI heard silence or only one side speaking. Classic dead-air pattern that burns buyer goodwill.",steps:["Open Call Intelligence and pull the flagged recordings","Check whether it clusters in one hour (dialer burst) or all day","Send the pub the call list and ask for credit","If it persists, lower or pause the source before buyers do it for you"]},
+};
+const ALERT_METRIC_LABEL={buyer_accept_rate:"Buyer accept %",publisher_pace:"Publisher pace",rpc_drop:"RPC drop",low_billable_pct:"Short calls",volume_drop:"Volume drop",overdue_invoices:"Overdue invoices",launch_no_calls:"Launch no calls",no_route_spike:"No-route spike",pub_share_behind:"Pub behind share",buyer_conversion:"Buyer not converting",losing_lane:"Losing lane",nontv_source:"Non-TV source",ad_promise:"Ad promise",transfer_inbound:"Inbound transfer",dead_air_insight:"Dead air (AI)"};
+
+// One alert system with ONE brain: Ryan's embedded page computes everything,
+// and after each of its renders it reports its two lists (Right now, This
+// week) up to the dashboard, which builds the tiles from exactly those
+// lists, grouped the way his page groups (his categories). So a tile's
+// count IS the coach's count, and clicking it applies his own filter —
+// the numbers can't disagree, because there is no second pull. The four
+// checks his CallGrid reports can't see (transfers, dead air, launches,
+// overdue invoices) come from the 15-minute engine as their own tiles,
+// with their cards and team-shared Ack shown inline right under the tiles.
+// Flagged calls open inline on this page too — nothing navigates away.
+function AlertsPage({user,data,onViewCalls}){
+  const [lists,setLists]=useState(null); // reported by Ryan's page after each render
+  const [extra,setExtra]=useState([]);   // engine-only open alerts
+  const [tile,setTile]=useState(null);
+  const [showCalls,setShowCalls]=useState(false);
+  const [callsKey,setCallsKey]=useState(0);
+  const [showSettings,setShowSettings]=useState(false);
+  const [myPref,setMyPref]=useState(undefined);
+  const [prefBusy,setPrefBusy]=useState(false);
+  const pcDrive=useRef(null);
+  const myEmail=(user?.email||"").toLowerCase();
+
+  // the coach reports its lists after every render (60s fast reports), and
+  // posts up the card title when someone clicks a recommendation
+  const listsRef=useRef(null);
+  const drillRef=useRef(()=>{});
+  const onCoachLists=React.useCallback(L=>{listsRef.current=L;setLists(L);},[]);
+  useEffect(()=>{
+    const onMsg=e=>{
+      const L=e?.data?.omnisurePCLists;
+      if(L&&Array.isArray(L.now)&&Array.isArray(L.week)){listsRef.current=L;setLists(L);return;}
+      const D=e?.data?.omnisurePCDrill;
+      if(D&&D.title)drillRef.current(String(D.title));
+    };
+    window.addEventListener("message",onMsg);
+    return()=>window.removeEventListener("message",onMsg);
+  },[]);
+  // Clicking a coach card opens the call browser right here, focused on the
+  // pub or buyer the card is about (transcripts, tags, recordings).
+  drillRef.current=title=>{
+    const t=String(title||"").trim();
+    const L=listsRef.current;
+    const all=L?[...L.now,...L.week]:[];
+    const it=all.find(r=>String(r.title||"").trim()===t)||all.find(r=>t&&String(r.title||"").trim().startsWith(t.slice(0,40)));
+    const who=String(it?.who||"").trim();
+    const lc=x=>String(x||"").trim().toLowerCase();
+    const callz=data?.callgridCalls||[];
+    let side=null;
+    if(it&&who){
+      if(it.cat==="Call a buyer")side="buyer";
+      else if(it.cat==="Call a pub"||it.risk)side="publisher";
+      else{
+        const w=lc(who);
+        if(callz.some(c=>lc(c.publisher_name)===w))side="publisher";
+        else if(callz.some(c=>lc(c.target_name)===w))side="buyer";
+      }
+    }
+    // infer which flag the card is about, so Call Intelligence opens filtered
+    // to the calls in question instead of the entity's whole call list
+    const low=lc(t+" "+String(it?.cat||""));
+    const flag=/promise|free coverage|gift card|grocery|benefit card|government program/.test(low)?"promise"
+      :/non-?tv|pop-?up|social|search/.test(low)?"nontv"
+      :/transfer/.test(low)?"transfer"
+      :/dead air|silen|no one spoke|agent only|caller only/.test(low)?"dead":null;
+    try{
+      if((side&&who)||flag)localStorage.setItem("ci_jump",JSON.stringify({side:side||undefined,name:side&&who?who:undefined,flag:flag||undefined,t:Date.now()}));
+      else localStorage.removeItem("ci_jump");
+    }catch(e){}
+    setCallsKey(k=>k+1);setShowCalls(true);
+    setTimeout(()=>{const el=document.getElementById("pc-calls");if(el)el.scrollIntoView({behavior:"smooth",block:"start"});},80);
+  };
+  const loadExtra=React.useCallback(async()=>{
+    try{const r=await sb("GET","alerts?status=eq.open&metric=in.(transfer_inbound,dead_air_insight,launch_no_calls,overdue_invoices)&order=fired_at.desc&limit=100&select=id,metric,severity,subject,message,fired_at");setExtra(r||[]);}
+    catch(e){/* engine table optional */}
+  },[]);
+  useEffect(()=>{loadExtra();const t=setInterval(()=>{if(document.visibilityState==="visible")loadExtra();},60000);return()=>clearInterval(t);},[loadExtra]);
+
+  async function ackExtra(id){try{await sb("PATCH",`alerts?id=eq.${id}`,{status:"acked",acked_at:new Date().toISOString(),acked_by:user?.id||user?.sub||null});loadExtra();}catch(e){alert(e.message);}}
+  async function loadMyPref(){
+    if(!myEmail){setMyPref(null);return;}
+    try{const r=await sb("GET",`notification_preferences?email=ilike.${encodeURIComponent(myEmail)}&limit=1`);setMyPref(r?.[0]||null);}
+    catch(e){setMyPref(null);}
+  }
+  async function setMyFlag(col,val){
+    if(!myPref)return;
+    setPrefBusy(true);
+    try{await sb("PATCH",`notification_preferences?id=eq.${myPref.id}`,{[col]:val});setMyPref(p=>({...p,[col]:val}));}
+    catch(e){alert(e.message);}
+    setPrefBusy(false);
+  }
+  async function addMe(){
+    setPrefBusy(true);
+    try{
+      const body={email:myEmail,name:myEmail.split("@")[0]};
+      for(const [k] of BELL_TYPES)body[k]=true;
+      const r=await sb("POST","notification_preferences",body);
+      setMyPref(Array.isArray(r)?r[0]:r);
+    }catch(e){alert(e.message);}
+    setPrefBusy(false);
+  }
+
+  // ── tiles: the coach's own grouping, so counts match clicks exactly ──
+  const now=lists?.now||[],week=lists?.week||[];
+  const weekCat=c=>week.filter(r=>r.cat===c);
+  const ENGINE_TILES=[
+    ["transfer_inbound","Transfers on inbound campaigns"],
+    ["dead_air_insight","Dead air on connected calls"],
+    ["launch_no_calls","Launches with no calls"],
+    ["overdue_invoices","Overdue invoices"],
+  ];
+  const exOf=m=>extra.filter(a=>a.metric===m);
+  const tiles=[
+    {id:"fixnow",label:"Fix these now",n:now.length,hot:now.some(r=>r.risk||r.sev==="high"),drive:{view:"now",cat:"All"}},
+    ...[["Compliance","Compliance flags"],["Call a pub","Call a pub"],["Call a buyer","Call a buyer"],["Fix routing","Fix routing"],["Renegotiate","Renegotiate"]].map(([c,label])=>{
+      const its=weekCat(c);
+      return {id:c,label,n:its.length,hot:its.some(r=>r.risk||r.sev==="high"),drive:{view:"week",cat:c}};
+    }),
+    ...ENGINE_TILES.map(([m,label])=>{
+      const its=exOf(m);
+      return {id:m,label,n:its.length,hot:its.some(a=>a.severity==="critical")||( ["transfer_inbound","dead_air_insight"].includes(m)&&its.length>0),engine:true};
+    }),
+  ];
+  const flags=now.filter(r=>r.risk).length+extra.length;
+  const selTile=tiles.find(t=>t.id===tile)||null;
+
+  const chipS=c=>({fontSize:10,fontWeight:700,color:c,border:`1px solid ${c}`,borderRadius:10,padding:"1px 9px",whiteSpace:"nowrap"});
+  const flagEl=<span style={{animation:"omniFlag 1.6s ease-in-out infinite",display:"inline-block"}}>🚩</span>;
+  const fmtT=ts=>new Date(ts).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit",timeZone:"America/New_York"});
+  const FLAG_OF={transfer_inbound:"transfer",dead_air_insight:"dead"};
+
+  const clickTile=t=>{
+    const nv=tile===t.id?null:t.id;
+    setTile(nv);
+    if(pcDrive.current)pcDrive.current(nv&&t.drive?t.drive:{view:"week",cat:"All"});
+    if(nv&&t.drive){
+      const el=document.getElementById("pc-embed");
+      if(el)el.scrollIntoView({behavior:"smooth",block:"start"});
+    }
+  };
+  const refreshAll=()=>{if(pcDrive.current)pcDrive.current({refresh:true});loadExtra();};
+  const openCalls=flag=>{
+    try{localStorage.setItem("ci_jump",JSON.stringify({flag:flag||null,t:Date.now()}));}catch(e){}
+    setCallsKey(k=>k+1);setShowCalls(true);
+  };
+  const renderExtraCard=a=>{
+    const pb=ALERT_PLAYBOOKS[a.metric];
+    return <div key={a.id} style={{...card,borderLeft:`4px solid ${a.severity==="critical"?C.red:C.amber}`,marginTop:10,padding:"12px 15px"}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:5}}>
+        <span style={chipS(a.severity==="critical"?C.red:C.amber)}>{String(a.severity||"warning").toUpperCase()}</span>
+        {a.subject&&<span style={{fontWeight:700,fontSize:13.5,color:C.text}}>{a.subject}</span>}
+        <span style={{fontSize:11,color:C.dim,marginLeft:"auto"}}>{a.fired_at?`${fmtT(a.fired_at)} ET`:""}</span>
+      </div>
+      <div style={{fontSize:12.5,color:C.text,lineHeight:1.55,marginBottom:6}}>{a.message}</div>
+      {pb&&<div style={{fontSize:12.5,color:C.text,lineHeight:1.55,marginBottom:8}}><span style={{color:C.accent,fontWeight:700}}>Fix now: </span>{pb.steps.slice(0,2).join(" Then: ")}</div>}
+      <Btn outline color={C.green} onClick={()=>ackExtra(a.id)} style={{padding:"3px 11px",fontSize:11.5}}>✓ Ack — handled</Btn>
+    </div>;
+  };
+
+  return <div>
+    <style>{`@keyframes omniFlag{0%,100%{opacity:1}50%{opacity:0.35}}`}</style>
+    <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",marginBottom:2}}>
+      <h2 style={{fontSize:20,fontWeight:700,margin:0,color:C.text}}>Alerts & Profit Coach</h2>
+      <div style={{display:"flex",gap:8,marginLeft:"auto",alignItems:"center"}}>
+        <Btn outline color={C.sub} onClick={refreshAll} style={{padding:"5px 12px",fontSize:12}}>↻ Refresh</Btn>
+        <Btn outline color={showSettings?C.accent:C.sub} onClick={()=>{const nv=!showSettings;setShowSettings(nv);if(nv&&myPref===undefined)loadMyPref();}} style={{padding:"5px 12px",fontSize:12}}>⚙ My email alerts</Btn>
+      </div>
+    </div>
+    <div style={{fontSize:16,fontWeight:700,color:flags?C.red:C.green,margin:"6px 0 2px"}}>
+      {flags?flagEl:null} Red flags right now: <span style={{fontSize:20}}>{flags}</span>
+    </div>
+    <div style={{fontSize:12,color:C.sub,marginBottom:16}}>
+      The tiles count exactly what the Profit Coach below has found — same brain, same numbers. Click one to focus the coach on those issues; call-tag checks can open the flagged calls right here. Engine checks (transfers, dead air, launches, invoices) update every 15 minutes; emails unchanged (Configuration → Notifications).
+    </div>
+    {showSettings&&<div style={{...card,marginBottom:16}}>
+      <div style={{fontSize:11,fontWeight:700,color:C.sub,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:8}}>My email alerts{myEmail?` — ${myEmail}`:""}</div>
+      {myPref===undefined&&<div style={{fontSize:12,color:C.sub}}>Loading…</div>}
+      {myPref===null&&<div>
+        <div style={{fontSize:12,color:C.sub,marginBottom:8}}>{myEmail?"You're not on the email alert list.":"No email on your login, so email alerts can't be set here."}</div>
+        {myEmail&&<Btn outline onClick={addMe} disabled={prefBusy} style={{padding:"4px 10px",fontSize:11}}>{prefBusy?"Adding…":"Email me alerts"}</Btn>}
+      </div>}
+      {myPref&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:"6px 14px"}}>
+        {BELL_TYPES.map(([k,l])=><label key={k} style={{display:"flex",gap:7,alignItems:"center",fontSize:12,color:C.text,cursor:"pointer"}}>
+          <input type="checkbox" checked={myPref[k]!==false} disabled={prefBusy} onChange={e=>setMyFlag(k,e.target.checked)} style={{accentColor:C.accent}}/>{l}
+        </label>)}
+      </div>}
+      {myPref&&<div style={{fontSize:11,color:C.dim,marginTop:8}}>These control which alert emails go to you. The page itself always shows everything.</div>}
+    </div>}
+
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(172px,1fr))",gap:10,marginBottom:14}}>
+      {tiles.map(t=>{
+        const active=tile===t.id;
+        return <button key={t.id} onClick={()=>clickTile(t)} style={{
+          textAlign:"left",cursor:"pointer",background:C.surface,
+          border:`1px solid ${t.hot?C.red:active?C.accent:C.border}`,
+          boxShadow:t.hot?`0 0 0 1px ${C.red}40`:active?`0 0 0 1px ${C.accent}40`:"none",
+          borderRadius:12,padding:"12px 14px",color:C.text}}>
+          <div style={{fontSize:9.5,fontWeight:700,letterSpacing:"0.07em",textTransform:"uppercase",color:active?C.accent:C.sub,marginBottom:8,lineHeight:1.4,minHeight:26}}>{t.label}</div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            {t.hot?flagEl:null}
+            <span style={{fontSize:24,fontWeight:700,...mono}}>{lists||t.engine?t.n:"…"}</span>
+            <span style={{marginLeft:"auto",...chipS(t.hot?C.red:t.n?C.amber:C.green)}}>{t.hot?"Alert":t.n?"Watch":"OK"}</span>
+          </div>
+        </button>;})}
+    </div>
+
+    {selTile&&<div style={{...card,marginBottom:14,borderLeft:`3px solid ${C.accent}`}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+        <div style={{fontSize:13.5,fontWeight:700,color:C.text}}>{selTile.label} — {selTile.n} issue{selTile.n===1?"":"s"}</div>
+        {selTile.drive&&<span style={{fontSize:12,color:C.sub}}>{selTile.id==="fixnow"?"The coach below is on its Right now tab.":`The coach below is filtered to "${selTile.id}".`}</span>}
+        {selTile.id==="Compliance"&&<React.Fragment>
+          <Btn onClick={()=>openCalls("promise")} style={{padding:"4px 12px",fontSize:12}}>📄 Promise calls</Btn>
+          <Btn onClick={()=>openCalls("nontv")} style={{padding:"4px 12px",fontSize:12}}>📄 Non-TV calls</Btn>
+        </React.Fragment>}
+        {FLAG_OF[selTile.id]&&<Btn onClick={()=>openCalls(FLAG_OF[selTile.id])} style={{padding:"4px 12px",fontSize:12}}>📄 View the flagged calls here</Btn>}
+        <Btn outline style={{padding:"3px 10px",fontSize:11,marginLeft:"auto"}} onClick={()=>clickTile(selTile)}>✕ Clear</Btn>
+      </div>
+      {selTile.engine&&exOf(selTile.id).map(renderExtraCard)}
+    </div>}
+
+    {showCalls&&<div id="pc-calls" style={{marginBottom:16}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,margin:"4px 0 10px"}}>
+        <div style={{fontSize:13.5,fontWeight:700,color:C.text}}>Flagged calls</div>
+        <Btn outline style={{padding:"3px 10px",fontSize:11}} onClick={()=>setShowCalls(false)}>✕ Close</Btn>
+      </div>
+      <div style={card}><CallIntel key={callsKey} data={data}/></div>
+    </div>}
+
+    <div id="pc-embed"/>
+    <NyalaProfitCoach data={data} driveRef={pcDrive} onLists={onCoachLists} onDrill={t=>drillRef.current(t)}/>
+  </div>;
+}
+
+// ─────────────────────────── Ask Claude ───────────────────────────
+// Floating dashboard assistant (bottom-right on every page). Questions go to
+// the ask-claude edge function: Claude Haiku with ONE read-only tool over
+// whitelisted tables. Sign-in required server-side; conversation lives in
+// memory for the session only.
+function AskClaude(){
+  const [openP,setOpenP]=useState(false);
+  const [msgs,setMsgs]=useState([]); // {role,content}
+  const [input,setInput]=useState("");
+  const [busy,setBusy]=useState(false);
+  const endRef=useRef(null);
+  useEffect(()=>{if(openP&&endRef.current)endRef.current.scrollIntoView({block:"end"});},[msgs,openP,busy]);
+  const send=async()=>{
+    const q=input.trim();
+    if(!q||busy)return;
+    const next=[...msgs,{role:"user",content:q}];
+    setMsgs(next);setInput("");setBusy(true);
+    try{
+      const session=sessionStorage.getItem("nyala_session");
+      const tok=session?JSON.parse(session).access_token:null;
+      if(!tok)throw new Error("Sign in to use the assistant.");
+      const r=await fetch(`${SUPABASE_URL}/functions/v1/ask-claude`,{method:"POST",headers:{"Content-Type":"application/json",apikey:SUPABASE_ANON_KEY,Authorization:`Bearer ${tok}`},body:JSON.stringify({messages:next})});
+      const j=await r.json();
+      if(!r.ok)throw new Error(j.error||`HTTP ${r.status}`);
+      setMsgs(m=>[...m,{role:"assistant",content:j.reply}]);
+    }catch(e){setMsgs(m=>[...m,{role:"assistant",content:`⚠ ${String(e?.message||e)}`}]);}
+    setBusy(false);
+  };
+  return <div style={{position:"fixed",right:22,bottom:22,zIndex:4000}}>
+    {openP&&<div style={{width:390,maxWidth:"calc(100vw - 44px)",height:520,maxHeight:"calc(100vh - 110px)",display:"flex",flexDirection:"column",background:C.surface,border:`1px solid ${C.border}`,borderRadius:14,boxShadow:C.shadow,marginBottom:10,overflow:"hidden"}}>
+      <div style={{padding:"11px 14px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:8}}>
+        <span style={{fontSize:14,fontWeight:700,color:C.text}}>✳ Ask about the dashboard</span>
+        {msgs.length>0&&<button onClick={()=>setMsgs([])} style={{marginLeft:"auto",background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:11}}>Clear</button>}
+        <button onClick={()=>setOpenP(false)} style={{marginLeft:msgs.length?0:"auto",background:"none",border:"none",color:C.sub,cursor:"pointer",fontSize:15}}>✕</button>
+      </div>
+      <div style={{flex:1,overflowY:"auto",padding:12}}>
+        {msgs.length===0&&<div style={{fontSize:12,color:C.sub,lineHeight:1.7,padding:"6px 4px"}}>
+          Ask about performance or how to use the dashboard:<br/>
+          "How many billable calls did Ocean Beach send today?"<br/>
+          "Why is profit down vs last Friday?"<br/>
+          "Where do I change a publisher's rate?"
+        </div>}
+        {msgs.map((m,i)=><div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start",marginBottom:8}}>
+          <div style={{maxWidth:"86%",padding:"8px 12px",borderRadius:12,fontSize:12.5,lineHeight:1.55,whiteSpace:"pre-wrap",
+            background:m.role==="user"?C.accent:C.bg,color:m.role==="user"?C.accentFg:C.text,
+            border:m.role==="user"?"none":`1px solid ${C.border}`}}>{m.content}</div>
+        </div>)}
+        {busy&&<div style={{fontSize:12,color:C.sub,padding:"4px 2px"}}>Looking at the data…</div>}
+        <div ref={endRef}/>
+      </div>
+      <div style={{padding:10,borderTop:`1px solid ${C.border}`,display:"flex",gap:8}}>
+        <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")send();}}
+          placeholder="Ask a question…" style={{flex:1,background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,color:C.text,fontSize:13,padding:"9px 12px",outline:"none"}}/>
+        <button onClick={send} disabled={busy||!input.trim()} style={{background:C.accent,color:C.accentFg,border:"none",borderRadius:8,padding:"0 16px",fontSize:13,fontWeight:700,cursor:busy?"default":"pointer",opacity:busy||!input.trim()?0.55:1}}>→</button>
+      </div>
+      <div style={{padding:"0 12px 8px",fontSize:10,color:C.dim}}>Read-only: it can look things up and point you to the right page, never change data.</div>
+    </div>}
+    <button onClick={()=>setOpenP(!openP)} title="Ask Claude about the dashboard" style={{marginLeft:"auto",display:"block",width:52,height:52,borderRadius:"50%",background:openP?C.surface:C.accent,color:openP?C.sub:C.accentFg,border:openP?`1px solid ${C.border}`:"none",boxShadow:C.shadow,cursor:"pointer",fontSize:21,fontWeight:700,float:"right"}}>{openP?"✕":"✳"}</button>
+  </div>;
+}
+
+// ─────────────────────────── Onboarding ───────────────────────────
+// The onboarding report (v5 layout): a focused working list of prospects,
+// new accounts, and new offers that need attention. HubSpot is truth; edits
+// save through onboarding-write; 📌 pins survive syncs. Last Activity uses
+// tracked real changes (activity_at), never HubSpot Modified Time — our own
+// hourly pushes touch every campaign, so that timestamp lies. Missing data
+// shows as missing, never today's date. Offers qualify only when they're
+// actually in flight (offer status set and not Complete, an onboarding
+// campaign status, or an unsigned IO) — historical signed IOs stay out.
+const OB_PICK={
+  intake:["Not Requested","Requested","Submitted"],
+  pros_msa:["Not Started","Redlining - Not Signed","Sent for Signature","Signed"],
+  pros_contract:["Draft","Redlining - Not Signed","Sent for Signature","Signed","Expired","Terminated"],
+  partner:["Prospective Buyer","Prospective Publisher","Both","Undetermined"],
+  acct_buyer:["Intake Form Submitted (Prospect)","Onboarding – Using Their Documents","Onboarding – Sent MSA","Onboarding – MSA Redlining","Onboarding – MSA Executed","Active","Paused","Collections/Blacklisted","Buyer Ended Relationship"],
+  acct_pub:["Intake Form Submitted (Prospect)","Onboarding – Sent MSA","Onboarding – MSA Redlining","Onboarding – MSA Executed","Active","Paused","Blacklisted","Publisher Ended Relationship"],
+  owners:["Adam Thayer","Jordi Mehmood","Chuck Hoskovec"],
+  offer:["Not Started","Awaiting Details","Pending Paperwork","IO Out for Signature","Ready for Setup","Ready for Launch","Complete"],
+  io:["Draft","Sent","Signed","Replaced","Expired"],
+};
+function OnboardingPage({user}){
+  const [pros,setPros]=useState(null);
+  const [accts,setAccts]=useState([]);
+  const [camps,setCamps]=useState([]);
+  const [contracts,setContracts]=useState([]);
+  const [ovs,setOvs]=useState([]);
+  const [err,setErr]=useState("");
+  const [busyCell,setBusyCell]=useState(null);
+  const [edit,setEdit]=useState(null);
+  const [showDone,setShowDone]=usePersistentState("ob_show_done",false);
+  const [q,setQ]=useState("");
+  const [openRow,setOpenRow]=useState(null);
+  const [showAll,setShowAll]=useState({}); // groupKey -> true
+  const [sorts,setSorts]=useState({}); // tableKey -> {col,dir}
+  const [addOpen,setAddOpen]=useState(false);
+  const [addForm,setAddForm]=useState({name:"",partner_type:"Undetermined",primary_contact:"",email:"",next_action:""});
+  const [adding,setAdding]=useState(false);
+  const [logOpen,setLogOpen]=useState(false);
+  const [logRows,setLogRows]=useState(null); // full override history, loaded on demand
+  const [agLinks,setAgLinks]=useState([]);   // Agreement Campaign Links junction mirror
+  const [cMatches,setCMatches]=useState([]); // Campaign Matches junction mirror
+
   const load=React.useCallback(async()=>{
     try{
-      const [rows,st]=await Promise.all([
-        sb("GET","alerts?status=eq.open&order=fired_at.desc&limit=100"),
-        sb("GET","ping_sync_state?key=eq.alert_engine&select=value").catch(()=>[]),
+      const [p,a,c,k,o,al,cm2]=await Promise.all([
+        sbAll("ob_prospects?select=*"),
+        sbAll("ob_accounts?select=*"),
+        sbAll("ob_campaigns?select=*"),
+        sbAll("ob_contracts?select=*"),
+        sbAll("ob_overrides?active=eq.true&select=*"),
+        sbAll("ob_agreement_links?select=*").catch(()=>[]),
+        sbAll("ob_campaign_matches?select=*").catch(()=>[]),
       ]);
-      setLastRun(st?.[0]?.value?.last_run||null);
-      setAlerts(rows||[]);
-      let last=seenRef.current;
-      if(last===null){try{last=localStorage.getItem("nyala_alerts_seen")||"";}catch(e){last="";}}
-      const fresh=(rows||[]).filter(a=>a.fired_at>last);
-      if(fresh.length&&last!==""){
-        setToasts(t=>[...fresh.slice(0,4).map(a=>({id:a.id,severity:a.severity,message:a.message})),...t].slice(0,4));
-      }
-      const newest=(rows||[]).map(a=>a.fired_at).sort().pop()||last||"";
-      seenRef.current=newest>(last||"")?newest:(last||"");
-      try{localStorage.setItem("nyala_alerts_seen",seenRef.current);}catch(e){}
-    }catch(e){/* alerts table may not exist yet */}
+      setPros(p||[]);setAccts(a||[]);setCamps(c||[]);setContracts(k||[]);setOvs(o||[]);setAgLinks(al||[]);setCMatches(cm2||[]);setErr("");
+    }catch(e){setErr(String(e?.message||e));setPros([]);}
   },[]);
-  useEffect(()=>{load();const t=setInterval(()=>{if(document.visibilityState==="visible")load();},60*1000);return()=>clearInterval(t);},[load]);
-  useEffect(()=>{if(!toasts.length)return;const t=setTimeout(()=>setToasts(x=>x.slice(0,-1)),10000);return()=>clearTimeout(t);},[toasts]);
-  async function resolve(id,status){try{await sb("PATCH",`alerts?id=eq.${id}`,{status,acked_at:new Date().toISOString(),acked_by:user?.id||user?.sub||null});setAlerts(a=>a.filter(x=>x.id!==id));}catch(e){alert(e.message);}}
-  async function ackAll(){for(const a of alerts)await sb("PATCH",`alerts?id=eq.${a.id}`,{status:"acked",acked_at:new Date().toISOString(),acked_by:user?.id||user?.sub||null}).catch(()=>{});setAlerts([]);}
-  const sevColor=s=>s==="critical"?C.red:s==="info"?C.accent:C.amber;
-  const fmtT=ts=>new Date(ts).toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit",timeZone:"America/New_York"});
-  return <>
-    <button onClick={()=>setOpen(o=>!o)} style={{width:"100%",background:alerts.length?`${C.amber}15`:"none",border:`1px solid ${alerts.length?C.amber:C.border}`,borderRadius:6,color:alerts.length?C.amber:C.sub,cursor:"pointer",fontSize:12,padding:"7px",marginBottom:8,fontWeight:alerts.length?700:400}}>
-      🔔 Alerts{alerts.length?` (${alerts.length})`:""}
-    </button>
-    {open&&<div style={{position:"fixed",right:16,top:16,width:400,maxWidth:"calc(100vw - 32px)",maxHeight:"82vh",overflowY:"auto",background:C.surface,border:`1px solid ${C.border}`,borderRadius:12,boxShadow:"0 12px 40px rgba(0,0,0,0.35)",zIndex:300,padding:16}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-        <div style={{fontSize:14,fontWeight:700}}>Alerts</div>
-        <div style={{display:"flex",gap:8}}>
-          {alerts.length>0&&<Btn outline color={C.sub} onClick={ackAll} style={{padding:"4px 10px",fontSize:11}}>Ack All</Btn>}
-          <Btn outline color={C.sub} onClick={()=>setOpen(false)} style={{padding:"4px 10px",fontSize:11}}>Close</Btn>
+  useEffect(()=>{load();},[load]);
+
+  const myEmail=(user?.email||"").toLowerCase();
+  const ovMap=React.useMemo(()=>{const m=new Map();for(const o of ovs)m.set(`${o.record_type}|${o.crm_id}|${o.field}`,o);return m;},[ovs]);
+  const ov=(t,id,f)=>ovMap.get(`${t}|${id}|${f}`);
+
+  async function writeCrmField(recordType,crmId,changes){
+    const session=sessionStorage.getItem("nyala_session");
+    const tok=session?JSON.parse(session).access_token:null;
+    const r=await fetch(`${SUPABASE_URL}/functions/v1/onboarding-write`,{method:"POST",headers:{"Content-Type":"application/json",apikey:SUPABASE_ANON_KEY,Authorization:`Bearer ${tok}`},body:JSON.stringify({record_type:recordType,crm_id:crmId,changes})});
+    const j=await r.json();
+    if(!r.ok||!j.saved)throw new Error(j.error||`HTTP ${r.status}`);
+    return j;
+  }
+  async function saveCell(){
+    if(!edit)return;
+    setBusyCell(edit.key);
+    try{
+      await writeCrmField(edit.recordType,edit.crmId,{[edit.col]:edit.val});
+      const now=new Date().toISOString();
+      const patch=rows=>rows.map(r=>r.crm_id===edit.crmId?{...r,[edit.col]:edit.val===""?null:edit.val,activity_at:now}:r);
+      if(edit.recordType==="prospect")setPros(patch);
+      else if(edit.recordType==="account")setAccts(patch);
+      else if(edit.recordType==="contract")setContracts(patch);
+      else setCamps(patch);
+      setEdit(null);
+    }catch(e){alert(`Could not save: ${e?.message||e}`);}
+    setBusyCell(null);
+  }
+  async function matchProspect(p,decision){
+    try{
+      const session=sessionStorage.getItem("nyala_session");
+      const tok=session?JSON.parse(session).access_token:null;
+      const r=await fetch(`${SUPABASE_URL}/functions/v1/onboarding-write`,{method:"POST",headers:{"Content-Type":"application/json",apikey:SUPABASE_ANON_KEY,Authorization:`Bearer ${tok}`},body:JSON.stringify({record_type:"prospect",crm_id:p.crm_id,match:decision,account_crm_id:decision==="confirm"?p.suggested_account_crm_id:undefined})});
+      const j=await r.json();
+      if(!r.ok||!j.saved)throw new Error(j.error||`HTTP ${r.status}`);
+      setPros(rows=>rows.map(x=>x.crm_id===p.crm_id?{...x,
+        linked_account_crm_id:decision==="confirm"?p.suggested_account_crm_id:x.linked_account_crm_id,
+        match_status:decision==="confirm"?"confirmed":"dismissed",
+        suggested_account_crm_id:null}:x));
+    }catch(e){alert(`Could not ${decision==="confirm"?"link":"dismiss"}: ${e?.message||e}`);}
+  }
+  async function setPin(recordType,crmId,field,value,note){
+    try{
+      const ex=ov(recordType,crmId,field);
+      if(ex)await sb("PATCH",`ob_overrides?id=eq.${ex.id}`,{active:false,removed_by:myEmail,removed_at:new Date().toISOString()});
+      if(value!=null)await sb("POST","ob_overrides",{record_type:recordType,crm_id:crmId,field,value:String(value),note:note||null,set_by:myEmail});
+      const o=await sbAll("ob_overrides?active=eq.true&select=*");setOvs(o||[]);
+    }catch(e){alert(`Override failed: ${e?.message||e}`);}
+  }
+
+  // ── computed: tracked activity only; missing stays missing ──
+  const today=new Date();
+  const lastAct=(t,id,r,useCrm)=>{
+    const pin=ov(t,id,"last_activity");
+    if(pin?.value)return {d:pin.value.slice(0,10),pinned:true};
+    if(r.activity_at)return {d:String(r.activity_at).slice(0,10),pinned:false};
+    if(useCrm){ // accounts/prospects: HubSpot's own activity time is not polluted by our pushes
+      const cands=[r.last_activity_time,r.modified_time].filter(Boolean).map(x=>String(x).slice(0,10));
+      const d=cands.sort().pop();if(d)return {d,pinned:false};
+    }
+    return {d:null,pinned:false};
+  };
+  const daysWaiting=d=>{if(!d)return null;const n=Math.floor((today-new Date(d+"T12:00:00"))/864e5);return n<0?0:n;};
+  const fmtD=d=>d?new Date(String(d).slice(0,10)+"T12:00:00").toLocaleDateString("en-US",{month:"short",day:"numeric"}):"—";
+  const inc=(t,id)=>ov(t,id,"report_include")?.value;
+  const kept=(t,id)=>ov(t,id,"keep_active")?.value==="true";
+
+  const conByCamp=React.useMemo(()=>{
+    const m=new Map();
+    for(const k of contracts){
+      for(const cid of [k.buyer_campaign_crm_id,k.publisher_campaign_crm_id])if(cid)m.set(cid,k);
+      if(k.dashboard_campaign_id)m.set("dash:"+k.dashboard_campaign_id,k);
+    }
+    // junction links (one agreement, many campaigns) — the newest signed doc wins per campaign
+    for(const l of agLinks){
+      if(["Removed","Superseded"].includes(l.link_status||""))continue;
+      const k=contracts.find(x=>x.crm_id===l.agreement_crm_id);
+      if(!k)continue;
+      for(const cid of [l.buyer_campaign_crm_id,l.publisher_campaign_crm_id]){
+        if(!cid)continue;
+        const ex=m.get(cid);
+        if(!ex||String(k.created_time||"")>String(ex.created_time||""))m.set(cid,k);
+      }
+    }
+    return m;
+  },[contracts,agLinks]);
+  const junctionLinked=React.useMemo(()=>new Set(agLinks.filter(l=>!["Removed","Superseded"].includes(l.link_status||"")).map(l=>l.agreement_crm_id)),[agLinks]);
+  const msaOf=(accId,side)=>{
+    const acc=accts.find(x=>x.crm_id===accId);
+    const docs=contracts.filter(k=>k.account_crm_id===accId&&["MSA","MSA + IO"].includes(k.document_type)&&(!k.partner_side||k.partner_side.toLowerCase().startsWith(side.slice(0,3))));
+    const signed=docs.find(k=>k.status==="Signed")||docs[0];
+    if(signed)return {t:signed.status||"—",d:signed.signed_date,link:signed.workdrive_file_link||signed.signed_pdf_link};
+    if(acc){
+      const yes=side==="buyer"?acc.buyer_msa_signed:acc.publisher_msa_signed;
+      if(yes==="Yes")return {t:"Signed",d:null,link:null};
+      if(side==="publisher"&&acc.publisher_msa_status)return {t:acc.publisher_msa_status,d:null,link:null};
+    }
+    return {t:"—",d:null,link:null};
+  };
+  const ioDocOf=c=>conByCamp.get(c.crm_id)||(c.dashboard_id?conByCamp.get("dash:"+c.dashboard_id):null);
+  // ── New Offers eligibility ──
+  // An offer needs attention while it is actually in flight: a human set an
+  // Offer Status (not Complete), the campaign is explicitly pending an IO, the
+  // IO Status is Draft/Sent, or a NEWLY INTRODUCED signed/sent IO agreement is
+  // linked to this exact campaign in HubSpot Contracts & Agreements. The
+  // agreement rule is chronology-gated (agreement created on/after the cutoff)
+  // so the 66 historical "Onboarding - IO Signed" records and the October
+  // backloaded agreements never requalify. Account status is irrelevant here:
+  // an Active account never hides a qualifying new offer.
+  const OB_NEW_AGREEMENT_CUTOFF="2026-11-07";
+  const isNewAgreement=k=>!!k&&/IO/i.test(k.document_type||"")&&["Sent","Signed"].includes(k.status||"")&&String(k.created_time||"")>=OB_NEW_AGREEMENT_CUTOFF;
+  const newAgreementOf=c=>{const d=ioDocOf(c);return isNewAgreement(d)?d:null;};
+  const needsAttention=c=>
+    (c.offer_status&&c.offer_status!=="Complete")
+    ||/^Pending IO/.test(c.campaign_status||"")
+    ||["Draft","Sent"].includes(c.io_status||"")
+    ||!!newAgreementOf(c);
+  const graduated=c=>c.offer_status==="Complete"||c.campaign_status==="Active";
+  // why a row is on the report (automatic rule vs manual override) — shown as
+  // a tooltip, and as a chip when a new agreement is the only reason
+  const whyShown=c=>{
+    if(inc(c.side+"_campaign",c.crm_id)==="true")return "manually included";
+    if(c.offer_status&&c.offer_status!=="Complete")return `offer status: ${c.offer_status}`;
+    if(/^Pending IO/.test(c.campaign_status||""))return c.campaign_status;
+    if(["Draft","Sent"].includes(c.io_status||""))return `IO ${c.io_status}`;
+    if(newAgreementOf(c))return "new signed agreement";
+    if(kept(c.side+"_campaign",c.crm_id))return "pinned to stay active";
+    return "";
+  };
+
+  const ql=q.trim().toLowerCase();
+  const hit=(...xs)=>!ql||xs.some(x=>String(x||"").toLowerCase().includes(ql));
+  const sideData=side=>{
+    const pt=side==="buyer"?["Prospective Buyer","Both","Undetermined"]:["Prospective Publisher","Both","Undetermined"];
+    const prospects=(pros||[]).filter(p=>
+      inc("prospect",p.crm_id)!=="false"
+      &&(inc("prospect",p.crm_id)==="true"||((!p.linked_account_crm_id)&&pt.includes(p.partner_type||"Undetermined")))
+      &&hit(p.name,p.primary_contact,p.next_action));
+    const stKey=side==="buyer"?"buyer_account_status":"publisher_account_status";
+    const onboarding=accts.filter(x=>{
+      const st=x[stKey]||"";
+      const auto=st.startsWith("Intake")||st.startsWith("Onboarding");
+      const i=inc("account:"+side,x.crm_id);
+      return i!=="false"&&(i==="true"||auto)&&hit(x.name,st);
+    });
+    const offers=camps.filter(c=>{
+      if(c.side!==side)return false;
+      const i=inc(c.side+"_campaign",c.crm_id);
+      if(i==="false")return false;
+      const grad=graduated(c);
+      if(i!=="true"&&!(needsAttention(c)&&!grad))
+        {if(!(showDone&&c.offer_status==="Complete")&&!kept(c.side+"_campaign",c.crm_id))return false;}
+      if(grad&&!kept(c.side+"_campaign",c.crm_id)&&!showDone&&i!=="true")return false;
+      return hit(c.account_name,c.name,c.offer_status,c.next_action);
+    });
+    // newly introduced signed/sent IO agreements with NO campaign link on
+    // either side: surfaced for human matching. Read-only by design — writing
+    // the campaign link onto the HubSpot agreement is gated for approval, so the
+    // match itself is made in HubSpot for now.
+    const review=contracts.filter(k=>{
+      if(!isNewAgreement(k))return false;
+      if(k.buyer_campaign_crm_id||k.publisher_campaign_crm_id)return false;
+      if(junctionLinked.has(k.crm_id))return false; // linked via Agreement Campaign Links
+      const ps=String(k.partner_side||"").toLowerCase();
+      if(ps&&!ps.startsWith(side.slice(0,3)))return false; // side unknown → shows on both
+      if(inc("contract",k.crm_id)==="false")return false;
+      return hit(k.account_name,k.name);
+    });
+    return {prospects,onboarding,offers,review};
+  };
+
+  const chip=(t,c)=><span style={{fontSize:10,fontWeight:700,color:c||C.sub,border:`1px solid ${c||C.border}`,borderRadius:4,padding:"1px 6px",whiteSpace:"nowrap"}}>{t}</span>;
+  const stC=v=>{const x=String(v||"");return x==="Active"||x==="Signed"||x==="Complete"||x==="Submitted"||x.includes("Executed")?C.green:x.startsWith("Onboarding")||x.startsWith("Pending")||x==="Sent"||x.includes("Signature")||x.includes("Redlining")||x.includes("Documents")||x.startsWith("Ready")?C.amber:x.includes("Blacklist")||x.includes("Ended")||x.includes("ended")||x==="Expired"||x==="Terminated"?C.red:C.sub;};
+  const cellBtn=(key,recordType,crmId,col,val,type,options,display)=>{
+    const editing=edit?.key===key;
+    if(editing)return <span style={{display:"inline-flex",gap:4,alignItems:"center"}}>
+      {type==="select"
+        ?<select autoFocus value={edit.val} onChange={e=>setEdit({...edit,val:e.target.value})} style={{...inputStyle,padding:"3px 6px",fontSize:12,width:"auto",maxWidth:240}}>
+          <option value="">—</option>
+          {options.map(o=><option key={o} value={o}>{o}</option>)}
+          {edit.val&&!options.includes(edit.val)&&<option value={edit.val}>{edit.val} (current)</option>}
+        </select>
+        :type==="date"
+        ?<input autoFocus type="date" value={edit.val||""} onChange={e=>setEdit({...edit,val:e.target.value})} style={{...inputStyle,padding:"3px 6px",fontSize:12,width:140}}/>
+        :<textarea autoFocus value={edit.val||""} onChange={e=>setEdit({...edit,val:e.target.value})} rows={type==="textarea"?3:1} style={{...inputStyle,padding:"3px 6px",fontSize:12,width:220,resize:"vertical"}}/>}
+      <button onClick={saveCell} disabled={busyCell===key} style={{background:C.green,border:"none",borderRadius:4,color:"#fff",cursor:"pointer",fontSize:11,padding:"3px 8px"}}>{busyCell===key?"…":"✓"}</button>
+      <button onClick={()=>setEdit(null)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:4,color:C.sub,cursor:"pointer",fontSize:11,padding:"3px 6px"}}>✕</button>
+    </span>;
+    return <span onClick={()=>setEdit({key,recordType,crmId,col,type,options,val:val==null?"":String(val)})}
+      title="Click to edit (saves to HubSpot)"
+      style={{cursor:"pointer",borderBottom:`1px dashed ${C.border}`}}>{display}</span>;
+  };
+  const td={padding:"7px 8px",borderBottom:`1px solid ${C.border}`,fontSize:12,color:C.text,verticalAlign:"top"};
+  const th={padding:"6px 8px",borderBottom:`2px solid ${C.border}`,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",color:C.sub,textAlign:"left",whiteSpace:"nowrap"};
+  const actCell=(t,id,r,useCrm)=>{
+    const la=lastAct(t,id,r,useCrm);const dw=daysWaiting(la.d);
+    return <React.Fragment>
+      <td style={td}>{la.pinned?"📌 ":""}{fmtD(la.d)}
+        <button title={la.pinned?"Remove pin (resume automatic)":"Pin a corrected date (survives syncs)"}
+          onClick={()=>{if(la.pinned){if(confirm("Remove the pinned date and resume automatic Last Activity?"))setPin(t,id,"last_activity",null);}else{const v=prompt("Pin Last Activity to date (YYYY-MM-DD):",la.d||"");if(v)setPin(t,id,"last_activity",v,"manual correction");}}}
+          style={{background:"none",border:"none",cursor:"pointer",fontSize:11,color:la.pinned?C.accent:C.dim,padding:"0 3px"}}>📌</button>
+      </td>
+      <td style={{...td,...mono,color:dw==null?C.dim:dw>=7?C.red:dw>=3?C.amber:C.text}}>{dw==null?"—":dw}</td>
+    </React.Fragment>;
+  };
+  const srt=(k,col)=>setSorts(ss=>{const cur=ss[k];return {...ss,[k]:{col,dir:cur&&cur.col===col&&cur.dir==="desc"?"asc":"desc"}};});
+  const SH=(k,col,label)=>{const a=sorts[k];const on=col&&a&&a.col===col;
+    return <th style={{...th,cursor:col?"pointer":"default",userSelect:"none",color:on?C.accent:th.color}} onClick={col?()=>srt(k,col):undefined} title={col?"Click to sort":undefined}>{label}{on?(a.dir==="desc"?" ▼":" ▲"):""}</th>;};
+  const applySort=(k,list,getters,defGet)=>{
+    const a=sorts[k];
+    const get=a&&getters[a.col]?getters[a.col]:defGet;
+    const dir=a&&getters[a.col]?(a.dir==="asc"?1:-1):-1; // default: newest activity first
+    return [...list].sort((x,y)=>{
+      const vx=get(x),vy=get(y);
+      const nx=vx==null||vx==="",ny=vy==null||vy==="";
+      if(nx&&ny)return 0;if(nx)return 1;if(ny)return -1; // blanks always last
+      return (vx<vy?-1:vx>vy?1:0)*dir;
+    });
+  };
+  const grpHd=(t,shownN,totalN,key)=><div style={{display:"flex",alignItems:"baseline",gap:10,margin:"16px 0 6px"}}>
+    <span style={{fontSize:11,fontWeight:700,color:C.accent,textTransform:"uppercase",letterSpacing:"0.07em"}}>{t} ({totalN})</span>
+    {totalN>shownN&&<button onClick={()=>setShowAll(x=>({...x,[key]:true}))} style={{background:"none",border:"none",color:C.accent,cursor:"pointer",fontSize:11}}>show all {totalN} ▸</button>}
+    {totalN>20&&showAll[key]&&<button onClick={()=>setShowAll(x=>({...x,[key]:false}))} style={{background:"none",border:"none",color:C.sub,cursor:"pointer",fontSize:11}}>show first 20</button>}
+  </div>;
+  const cap=(list,key)=>showAll[key]?list:list.slice(0,20);
+  const wd=link=>link?<a href={link} target="_blank" rel="noreferrer" style={{color:C.accent,fontSize:11}}>📄 Document</a>:null;
+  const removeBtn=(t,id)=><button title="Remove from this report (kept in HubSpot)" onClick={()=>{if(confirm("Remove this row from the onboarding report? The HubSpot record is untouched and you can re-add it later."))setPin(t,id,"report_include","false","removed from report");}} style={{background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:11}}>✕</button>;
+
+  // IO terms vs live CallGrid settings, highlighted when they disagree
+  const offerDetail=c=>{
+    const pairs=obLivePairs(c);
+    const mism=pairs.filter(p=>p.bad).length;
+    return <div style={{padding:"10px 16px 14px 34px",background:"rgba(255,255,255,0.02)",borderBottom:`1px solid ${C.border}`}}>
+      <div style={{fontSize:10,fontWeight:700,color:mism?C.amber:C.sub,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:8}}>
+        IO terms vs live CallGrid settings{mism?` — ${mism} discrepanc${mism===1?"y":"ies"}`:" — in agreement"}
+      </div>
+      <table style={{borderCollapse:"collapse"}}>
+        <thead><tr><th style={th}></th><th style={th}>Contract (IO)</th><th style={th}>Live (CallGrid)</th></tr></thead>
+        <tbody>{pairs.map(p=><tr key={p.label}>
+          <td style={{...td,color:C.sub,fontSize:11}}>{p.label}</td>
+          <td style={{...td,color:p.io==null?C.dim:C.text,background:p.bad?"rgba(255,180,60,0.12)":"transparent"}}>{p.io==null?"—":String(p.io)}</td>
+          <td style={{...td,color:obLiveColor(p.live.mode),background:p.bad?"rgba(255,180,60,0.12)":"transparent"}}>{p.live.t}</td>
+        </tr>)}</tbody>
+      </table>
+      <div style={{fontSize:9.5,color:C.dim,marginTop:4}}>Open = CallGrid confirms no limit set · N/A = inapplicable to this campaign type · Unknown = not CallGrid-verified. Display only, nothing is written back.</div>
+      <div style={{display:"flex",gap:16,flexWrap:"wrap",marginTop:10,fontSize:11,color:C.sub}}>
+        {c.side==="buyer"&&<span>CPA Goal: {cellBtn(`ccpa${c.crm_id}`,"buyer_campaign",c.crm_id,"buyer_cpa_goal",c.buyer_cpa_goal,"text",null,<span style={{color:c.buyer_cpa_goal?C.teal:C.dim,fontWeight:c.buyer_cpa_goal?700:400}}>{c.buyer_cpa_goal||"set…"}</span>)}</span>}
+        {c.vertical&&<span>Vertical: {c.vertical}</span>}
+        {c.lead_type&&<span>Lead type: {c.lead_type}</span>}
+        {c.traffic_type&&<span>Traffic: {c.traffic_type}</span>}
+        {c.io_states&&<span>IO states: {String(c.io_states).slice(0,120)}</span>}
+        {c.callgrid_campaign&&<span>CallGrid: {c.callgrid_campaign}</span>}
+      </div>
+      <div style={{marginTop:8,maxWidth:520}}>
+        {cellBtn(`cnote${c.crm_id}`,c.side+"_campaign",c.crm_id,"campaign_notes",c.campaign_notes,"textarea",null,<span style={{fontSize:11,color:c.campaign_notes?C.sub:C.dim}}>{c.campaign_notes||"add campaign notes…"}</span>)}
+      </div>
+    </div>;
+  };
+
+  const section=side=>{
+    const D=sideData(side);
+    const isB=side==="buyer";
+    const gk=g=>side+g;
+    const stKey0=isB?"buyer_account_status":"publisher_account_status";
+    const laP=p=>lastAct("prospect",p.crm_id,p,true).d||"";
+    const laA=x=>lastAct("account",x.crm_id,x,true).d||"";
+    const laO=c=>lastAct(c.side+"_campaign",c.crm_id,c,false).d||"";
+    const P=applySort(gk("p"),D.prospects,{partner:p=>String(p.name||"").toLowerCase(),intake:p=>p.intake_status||"",msa:p=>p.msa_status||"",contract:p=>p.contract_status||"",closed:p=>p.who_closed||"",act:laP,days:laP},laP);
+    const A=applySort(gk("a"),D.onboarding,{account:x=>String(x.name||"").toLowerCase(),status:x=>x[stKey0]||"",closed:x=>x.closed_the_deal||"",act:laA,days:laA},laA);
+    const O=applySort(gk("o"),D.offers,{account:c=>String(c.account_name||"").toLowerCase(),name:c=>String(c.name||"").toLowerCase(),offer:c=>c.offer_status||"",io:c=>c.io_status||c.io_date_signed||"",fup:c=>c.follow_up_owner||"",act:laO,days:laO},laO);
+    return <div style={{...card,marginBottom:20,overflowX:"auto"}}>
+      <div style={{fontSize:14,fontWeight:800,color:C.text,letterSpacing:"0.04em"}}>{isB?"BUYER ONBOARDING":"PUBLISHER ONBOARDING"}</div>
+
+      {grpHd("Prospects — pre-intake",cap(P,gk("p")).length,P.length,gk("p"))}
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:980}}>
+        <thead><tr>{SH(gk("p"),"partner","Partner")}{SH(gk("p"),"intake","Intake")}{SH(gk("p"),"msa","MSA")}{SH(gk("p"),"contract","Contract")}{SH(gk("p"),"closed","Closed by")}{SH(gk("p"),"act","Last activity")}{SH(gk("p"),"days","Days")}{SH(gk("p"),null,"Next action / notes")}{SH(gk("p"),null,"")}</tr></thead>
+        <tbody>
+        {P.length===0&&<tr><td style={{...td,color:C.dim}} colSpan={9}>None.</td></tr>}
+        {cap(P,gk("p")).map(p=>{const id=p.crm_id;return <tr key={id}>
+          <td style={{...td,fontWeight:700}}>{p.name}<div style={{fontSize:10,color:C.dim}}>{p.primary_contact||""} {p.email||""}{p.campaign_details?` · ${String(p.campaign_details).slice(0,60)}`:""}</div>
+            {(p.suggested_account_crm_id&&["auto_matched","needs_review"].includes(p.match_status||""))&&(()=>{const acc=accts.find(x=>x.crm_id===p.suggested_account_crm_id);return <div style={{marginTop:4,fontSize:11,fontWeight:500,color:C.amber,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+              <span>{p.match_status==="auto_matched"?"Became an account:":"Possible account match:"} <b>{acc?acc.name:p.suggested_account_crm_id}</b></span>
+              <button onClick={()=>{if(confirm(`Link this prospect to the account "${acc?acc.name:p.suggested_account_crm_id}"? This saves Linked CRM Account to HubSpot and graduates the prospect off this report.`))matchProspect(p,"confirm");}} style={{background:C.green,border:"none",borderRadius:4,color:"#fff",cursor:"pointer",fontSize:10,fontWeight:700,padding:"2px 8px"}}>Confirm & link</button>
+              <button onClick={()=>matchProspect(p,"dismiss")} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:4,color:C.sub,cursor:"pointer",fontSize:10,padding:"2px 8px"}}>Not a match</button>
+            </div>;})()}
+          </td>
+          <td style={td}>{cellBtn(`pi${id}`,"prospect",id,"intake_status",p.intake_status,"select",OB_PICK.intake,chip(p.intake_status||"—",stC(p.intake_status)))}</td>
+          <td style={td}>{cellBtn(`pm${id}`,"prospect",id,"msa_status",p.msa_status,"select",OB_PICK.pros_msa,chip(p.msa_status||"—",stC(p.msa_status)))}</td>
+          <td style={td}>{cellBtn(`pc${id}`,"prospect",id,"contract_status",p.contract_status,"select",OB_PICK.pros_contract,chip(p.contract_status||"—",stC(p.contract_status)))} {wd(p.workdrive_contract_link)}</td>
+          <td style={td}>{cellBtn(`pw${id}`,"prospect",id,"who_closed",p.who_closed,"select",OB_PICK.owners,<span>{p.who_closed||<span style={{color:C.dim}}>set…</span>}</span>)}</td>
+          {actCell("prospect",id,p,true)}
+          <td style={{...td,maxWidth:240}}>
+            {cellBtn(`pn${id}`,"prospect",id,"next_action",p.next_action,"textarea",null,<span style={{color:p.next_action?C.text:C.dim}}>{p.next_action||"add next action…"}</span>)}
+            <div style={{fontSize:10}}>{cellBtn(`pf${id}`,"prospect",id,"next_follow_up_date",p.next_follow_up_date,"date",null,p.next_follow_up_date?<span style={{color:C.amber}}>follow up {fmtD(p.next_follow_up_date)}</span>:<span style={{color:C.dim}}>set follow-up…</span>)}</div>
+            {cellBtn(`po${id}`,"prospect",id,"onboarding_notes",p.onboarding_notes,"textarea",null,<div style={{fontSize:10,color:p.onboarding_notes?C.sub:C.dim}}>{p.onboarding_notes?String(p.onboarding_notes).slice(0,80):"notes…"}</div>)}
+          </td>
+          <td style={td}>{removeBtn("prospect",id)}</td>
+        </tr>;})}
+        </tbody>
+      </table>
+
+      {grpHd(isB?"Onboarding — new accounts":"Onboarding",cap(A,gk("a")).length,A.length,gk("a"))}
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:980}}>
+        <thead><tr>{SH(gk("a"),"account","Account")}{SH(gk("a"),"status","Account status")}{SH(gk("a"),null,"MSA status / date")}{SH(gk("a"),null,"Paperwork")}{SH(gk("a"),"closed","Closed by")}{SH(gk("a"),"act","Last activity")}{SH(gk("a"),"days","Days")}{SH(gk("a"),null,"Notes")}{SH(gk("a"),null,"")}</tr></thead>
+        <tbody>
+        {A.length===0&&<tr><td style={{...td,color:C.dim}} colSpan={9}>None.</td></tr>}
+        {cap(A,gk("a")).map(x=>{const id=x.crm_id;const stCol=stKey0;const noteCol=isB?"buyer_notes":"publisher_notes";const msa=msaOf(id,side);return <tr key={id}>
+          <td style={{...td,fontWeight:700}}>{x.name}<div style={{fontSize:10,color:C.dim}}>{x.verticals||""}</div></td>
+          <td style={td}>{cellBtn(`as${id}`,"account",id,stCol,x[stCol],"select",isB?OB_PICK.acct_buyer:OB_PICK.acct_pub,chip(x[stCol]||"—",stC(x[stCol])))}</td>
+          <td style={td}>{chip(msa.t,stC(msa.t))}{msa.d?<span style={{fontSize:11,color:C.sub}}> {fmtD(msa.d)}</span>:null} {wd(msa.link)}</td>
+          <td style={td}>{chip((isB?x.buyer_paperwork_status:x.publisher_paperwork_status)||x.overall_paperwork_status||"—",stC((isB?x.buyer_paperwork_status:x.publisher_paperwork_status)==="Complete"?"Complete":""))}</td>
+          <td style={td}>{cellBtn(`ao${id}`,"account",id,"closed_the_deal",x.closed_the_deal,"select",OB_PICK.owners,<span>{x.closed_the_deal||<span style={{color:C.dim}}>set…</span>}</span>)}</td>
+          {actCell("account",id,x,true)}
+          <td style={{...td,maxWidth:240}}>{cellBtn(`an${id}`,"account",id,noteCol,x[noteCol],"textarea",null,<span style={{fontSize:11,color:x[noteCol]?C.sub:C.dim}}>{x[noteCol]?String(x[noteCol]).slice(0,90):"notes…"}</span>)}</td>
+          <td style={td}>{removeBtn("account:"+side,id)}</td>
+        </tr>;})}
+        </tbody>
+      </table>
+
+      {D.review.length>0&&<React.Fragment>
+        <div style={{display:"flex",alignItems:"baseline",gap:10,margin:"16px 0 6px",flexWrap:"wrap"}}>
+          <div style={{fontSize:12,fontWeight:800,color:C.amber,letterSpacing:"0.05em",textTransform:"uppercase"}}>Agreements needing campaign match ({D.review.length})</div>
+          <div style={{fontSize:10,color:C.dim}}>signed/sent IOs with no linked {side} campaign — set the {isB?"Buyer":"Publisher"} Campaign on the agreement in HubSpot (Contracts & Agreements); linking from here is pending approval</div>
+        </div>
+        <table style={{borderCollapse:"collapse",width:"100%",minWidth:980}}>
+          <thead><tr><th style={th}>Agreement</th><th style={th}>Account</th><th style={th}>Status</th><th style={th}>Created</th><th style={th}>Likely campaign match</th><th style={th}></th></tr></thead>
+          <tbody>
+          {D.review.map(k=>{
+            const kt=new Set(String(k.name||"").toLowerCase().replace(/[^a-z0-9$ ]+/g," ").split(/\s+/).filter(w=>w.length>2&&!["the","and","pub","buyer","universal"].includes(w)));
+            const cands=camps.filter(c=>c.side===side&&c.account_crm_id===k.account_crm_id&&!graduated(c))
+              .map(c=>{let s=0;for(const w of String(c.name||"").toLowerCase().replace(/[^a-z0-9$ ]+/g," ").split(/\s+/))if(w.length>2&&kt.has(w))s++;return {c,s};})
+              .sort((a,b)=>b.s-a.s).slice(0,3);
+            return <tr key={k.crm_id}>
+              <td style={{...td,fontWeight:700,maxWidth:300}}>{k.name} {wd(k.workdrive_file_link||k.signed_pdf_link)}</td>
+              <td style={td}>{k.account_name||"—"}</td>
+              <td style={td}>{chip(k.status||"—",stC(k.status))}{k.signed_date?<span style={{fontSize:11,color:C.sub}}> {fmtD(k.signed_date)}</span>:null}</td>
+              <td style={{...td,fontSize:11,color:C.sub}}>{fmtD(String(k.created_time||"").slice(0,10))}</td>
+              <td style={td}>{cands.length===0?<span style={{color:C.dim,fontSize:11}}>no open {side} campaigns on this account</span>
+                :cands.map(({c,s})=><div key={c.crm_id} style={{fontSize:11,marginBottom:2}}>{s>0?"★ ":""}{c.name} {chip(c.offer_status||c.io_status||"no status",stC(c.offer_status))}</div>)}</td>
+              <td style={td}><button title="Not an onboarding item — hide from this report (the HubSpot agreement is untouched)" onClick={()=>{if(confirm("Hide this agreement from the onboarding report? It stays untouched in HubSpot."))setPin("contract",k.crm_id,"report_include","false","dismissed from match review");}} style={{background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:12}}>✕</button></td>
+            </tr>;})}
+          </tbody>
+        </table>
+      </React.Fragment>}
+
+      {grpHd("New offers — in flight",cap(O,gk("o")).length,O.length,gk("o"))}
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:1080}}>
+        <thead><tr>{SH(gk("o"),null,"")}{SH(gk("o"),"account","Account")}{SH(gk("o"),"name","Offer / campaign")}{SH(gk("o"),"offer","Offer status")}{SH(gk("o"),"io","IO status / date")}{SH(gk("o"),"fup","Follow-up")}{SH(gk("o"),"act","Last activity")}{SH(gk("o"),"days","Days")}{SH(gk("o"),null,"Next action")}{SH(gk("o"),null,"")}</tr></thead>
+        <tbody>
+        {O.length===0&&<tr><td style={{...td,color:C.dim}} colSpan={10}>Nothing in flight{showDone?"":" (completed offers are hidden — tick Show completed)"}.</td></tr>}
+        {cap(O,gk("o")).map(c=>{const id=c.crm_id;const rt=c.side+"_campaign";const doc=ioDocOf(c);const done=graduated(c);return <React.Fragment key={id}>
+        <tr style={done?{opacity:0.65}:undefined} title={whyShown(c)?`On the report because: ${whyShown(c)}`:undefined}>
+          <td style={td}><button onClick={()=>setOpenRow(openRow===id?null:id)} style={{background:"none",border:"none",color:C.accent,cursor:"pointer",fontSize:11}}>{openRow===id?"▾":"▸"}</button></td>
+          <td style={{...td,fontWeight:700}}>{c.account_name||"—"} {done&&chip(c.campaign_status==="Active"?"LIVE":"COMPLETE",C.green)}</td>
+          <td style={td}>{cellBtn(`cn${id}`,rt,id,"name",c.name,"text",null,c.name)}<div style={{fontSize:10,color:C.dim}}>{c.callgrid_campaign||""}</div>{!done&&whyShown(c)==="new signed agreement"&&<div style={{marginTop:2}}>{chip("NEW SIGNED AGREEMENT",C.amber)}</div>}</td>
+          <td style={td}>{cellBtn(`co${id}`,rt,id,"offer_status",c.offer_status,"select",OB_PICK.offer,chip(c.offer_status||"—",stC(c.offer_status)))}
+            {c.offer_status==="Ready for Launch"&&!(doc&&doc.status==="Signed")&&<div style={{marginTop:3}} title="No executed IO document is linked to this campaign in Contracts & Agreements. A Signed text status alone is not proof. Match the agreement on the CRM Agreements tab — nothing is paused or changed automatically.">{chip("⚠ NO EXECUTED IO LINKED",C.red)}</div>}
+            {c.offer_status==="Ready for Launch"&&!cMatches.some(m=>["Confirmed","Ready for Launch","Live"].includes(m.match_stage)&&(m.buyer_campaign_crm_id===c.crm_id||m.publisher_campaign_crm_id===c.crm_id))&&<div style={{marginTop:3}} title="No confirmed buyer-publisher match exists for this campaign. Confirm one on the CRM Supply & Demand tab before launch.">{chip("⚠ NO CONFIRMED MATCH",C.amber)}</div>}
+          </td>
+          <td style={td}>
+            {cellBtn(`ci${id}`,rt,id,"io_status",c.io_status,"select",OB_PICK.io,chip(c.io_status||(doc?doc.status:"—"),stC(c.io_status||doc?.status)))}
+            {" "}{cellBtn(`cd${id}`,rt,id,"io_date_signed",c.io_date_signed,"date",null,<span style={{fontSize:11,color:C.sub}}>{c.io_date_signed?fmtD(c.io_date_signed):(doc?.signed_date?fmtD(doc.signed_date):"set date…")}</span>)}
+            {" "}{wd(c.io_workdrive_link||doc?.workdrive_file_link||doc?.signed_pdf_link)}
+          </td>
+          <td style={td}>{cellBtn(`cw${id}`,rt,id,"follow_up_owner",c.follow_up_owner,"select",OB_PICK.owners,<span>{c.follow_up_owner||<span style={{color:C.dim}}>assign…</span>}</span>)}</td>
+          {actCell(rt,id,c,false)}
+          <td style={{...td,maxWidth:240}}>
+            {cellBtn(`ca${id}`,rt,id,"next_action",c.next_action,"textarea",null,<span style={{color:c.next_action?C.text:C.dim}}>{c.next_action||"add next action…"}</span>)}
+            <div style={{fontSize:10}}>{cellBtn(`cf${id}`,rt,id,"follow_up_date",c.follow_up_date,"date",null,c.follow_up_date?<span style={{color:C.amber}}>follow up {fmtD(c.follow_up_date)}</span>:<span style={{color:C.dim}}>set follow-up…</span>)}</div>
+          </td>
+          <td style={td}>
+            {done&&(kept(rt,id)
+              ?<button title="Reopened as a visible exception (who/when recorded). Click to return it to completed — the real live status was never changed." onClick={()=>setPin(rt,id,"keep_active",null)} style={{background:"none",border:`1px solid ${C.accent}`,borderRadius:4,cursor:"pointer",fontSize:10,color:C.accent,padding:"1px 6px"}}>reopened ✕</button>
+              :<button title="Reopen: keep this completed item on the active report as a visible exception, with who/when and a reason recorded. The live status in HubSpot/CallGrid is not changed." onClick={()=>{const note=prompt("Why reopen this item? (recorded in the override log)","follow-up needed");if(note==null)return;setPin(rt,id,"keep_active","true",note||"reopened");}} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:4,cursor:"pointer",fontSize:10,color:C.sub,padding:"1px 6px"}}>Reopen</button>)}
+            {removeBtn(rt,id)}
+          </td>
+        </tr>
+        {openRow===id&&<tr><td style={{padding:0,borderBottom:"none"}} colSpan={10}>{offerDetail(c)}</td></tr>}
+        </React.Fragment>;})}
+        </tbody>
+      </table>
+    </div>;
+  };
+
+  if(pros===null)return <div style={{color:C.sub,fontSize:13,padding:"40px 0",textAlign:"center"}}>Loading the onboarding report…</div>;
+  return <div>
+    <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",marginBottom:4}}>
+      <h2 style={{fontSize:20,fontWeight:700,margin:0,color:C.text}}>Onboarding</h2>
+      <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search accounts / offers…" style={{...inputStyle,width:220,padding:"6px 10px",fontSize:12}}/>
+      <label style={{display:"flex",gap:6,alignItems:"center",fontSize:11,color:C.sub,cursor:"pointer"}}>
+        <input type="checkbox" checked={showDone} onChange={e=>setShowDone(e.target.checked)}/>Show completed
+      </label>
+      <button onClick={async()=>{if(!logOpen){try{setLogRows(await sbAll("ob_overrides?select=*&order=set_at.desc&limit=300"));}catch(_e){setLogRows([]);}}setLogOpen(!logOpen);}}
+        style={{background:"none",border:"none",color:logOpen?C.accent:C.sub,fontSize:11,cursor:"pointer",textDecoration:"underline"}}>Override log</button>
+      <div style={{display:"flex",gap:8,marginLeft:"auto"}}>
+        <Btn outline color={C.sub} onClick={load} style={{padding:"5px 12px",fontSize:12}}>↻ Refresh</Btn>
+        <Btn onClick={()=>setAddOpen(true)} style={{padding:"5px 12px",fontSize:12}}>+ Add prospect</Btn>
+      </div>
+    </div>
+    <div style={{fontSize:12,color:C.sub,marginBottom:14}}>
+      The working report: what needs attention. HubSpot is truth — dashed underline = click to edit, saved to HubSpot. 📌 pins a manual value that survives syncs. Last activity counts real changes only (statuses, IO fields, next actions); "—" means nothing recorded yet, never today's date. ▸ on an offer shows IO terms vs live CallGrid settings. Full records live in CRM.
+    </div>
+    {err&&<div style={{border:`1px solid ${C.red}66`,background:"rgba(255,80,80,0.07)",color:C.red,borderRadius:8,padding:"10px 14px",fontSize:13,marginBottom:14}}>{err}{String(err).includes("does not exist")?" — run the Phase 1 migrations first.":""}</div>}
+
+    {logOpen&&<div style={{...card,marginBottom:16,overflowX:"auto"}}>
+      <div style={{fontSize:12,fontWeight:800,color:C.text,marginBottom:8}}>Override log — every manual include/exclude/pin/reopen, who and when (automatic rules are not overrides)</div>
+      {logRows===null?<div style={{fontSize:12,color:C.sub}}>Loading…</div>:
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:880}}>
+        <thead><tr>{["When","Who","Record","Field","Value","Reason / note","Removed"].map(h=><th key={h} style={{padding:"5px 8px",borderBottom:`2px solid ${C.border}`,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",color:C.sub,textAlign:"left"}}>{h}</th>)}</tr></thead>
+        <tbody>
+        {logRows.length===0&&<tr><td style={{padding:8,fontSize:12,color:C.dim}} colSpan={7}>No overrides recorded yet.</td></tr>}
+        {logRows.map(o=>{
+          const nm=(o.record_type==="prospect"?(pros||[]).find(p=>p.crm_id===o.crm_id)?.name
+            :o.record_type.startsWith("account")?accts.find(a=>a.crm_id===o.crm_id)?.name
+            :o.record_type==="contract"?contracts.find(k=>k.crm_id===o.crm_id)?.name
+            :camps.find(c=>c.crm_id===o.crm_id)?.name)||o.crm_id;
+          return <tr key={o.id} style={o.active?undefined:{opacity:0.55}}>
+            <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`,fontSize:11,color:C.sub,whiteSpace:"nowrap"}}>{String(o.set_at||"").slice(0,16).replace("T"," ")}</td>
+            <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`,fontSize:11}}>{o.set_by||"—"}</td>
+            <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`,fontSize:11.5,fontWeight:600}}>{nm}<span style={{color:C.dim,fontSize:10}}> ({o.record_type})</span></td>
+            <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`,fontSize:11}}>{o.field}</td>
+            <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`,fontSize:11}}>{o.value==null?"(cleared)":String(o.value).slice(0,40)}</td>
+            <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`,fontSize:11,color:C.sub}}>{o.note||"—"}</td>
+            <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`,fontSize:11,color:C.sub}}>{o.removed_at?`${String(o.removed_at).slice(0,10)} by ${o.removed_by||"—"}`:(o.active?"":"inactive")}</td>
+          </tr>;})}
+        </tbody>
+      </table>}
+    </div>}
+
+    {section("buyer")}
+    {section("publisher")}
+
+    {addOpen&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={()=>setAddOpen(false)}>
+      <div style={{...card,width:420,maxWidth:"92vw"}} onClick={e=>e.stopPropagation()}>
+        <div style={{fontSize:15,fontWeight:700,color:C.text,marginBottom:12}}>Add a prospective partner</div>
+        {[["name","Company name"],["primary_contact","Primary contact"],["email","Email"],["next_action","Next action"]].map(([k,l])=><div key={k} style={{marginBottom:10}}>
+          <div style={{fontSize:10,fontWeight:700,color:C.sub,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:3}}>{l}</div>
+          <input value={addForm[k]} onChange={e=>setAddForm(f=>({...f,[k]:e.target.value}))} style={{...inputStyle,width:"100%",fontSize:13}}/>
+        </div>)}
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:10,fontWeight:700,color:C.sub,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:3}}>Partner type</div>
+          <select value={addForm.partner_type} onChange={e=>setAddForm(f=>({...f,partner_type:e.target.value}))} style={{...inputStyle,width:"100%",fontSize:13}}>
+            {OB_PICK.partner.map(o=><option key={o} value={o}>{o}</option>)}
+          </select>
+        </div>
+        <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+          <Btn outline color={C.sub} onClick={()=>setAddOpen(false)}>Cancel</Btn>
+          <Btn disabled={adding||!addForm.name.trim()} onClick={async()=>{
+            setAdding(true);
+            try{
+              const session=sessionStorage.getItem("nyala_session");
+              const tok=session?JSON.parse(session).access_token:null;
+              const r=await fetch(`${SUPABASE_URL}/functions/v1/onboarding-write`,{method:"POST",headers:{"Content-Type":"application/json",apikey:SUPABASE_ANON_KEY,Authorization:`Bearer ${tok}`},body:JSON.stringify({record_type:"prospect",create:true,changes:{name:addForm.name.trim(),partner_type:addForm.partner_type,primary_contact:addForm.primary_contact||null,email:addForm.email||null,next_action:addForm.next_action||null,intake_status:"Not Requested"}})});
+              const j=await r.json();
+              if(!r.ok||!j.saved)throw new Error(j.error||`HTTP ${r.status}`);
+              setAddOpen(false);setAddForm({name:"",partner_type:"Undetermined",primary_contact:"",email:"",next_action:""});
+              load();
+            }catch(e){alert(`Could not create: ${e?.message||e}`);}
+            setAdding(false);
+          }}>{adding?"Creating…":"Create in HubSpot"}</Btn>
         </div>
       </div>
-      {!alerts.length&&<div style={{color:C.sub,fontSize:13,padding:"16px 0",textAlign:"center"}}>No open alerts — all clear.</div>}
-      {lastRun&&<div style={{fontSize:11,color:C.dim,textAlign:"center",marginBottom:8}}>Engine last checked {new Date(lastRun).toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit",timeZone:"America/New_York"})} ET · runs every 15 min</div>}
-      {alerts.map(a=><div key={a.id} style={{borderLeft:`3px solid ${sevColor(a.severity)}`,background:C.bg,borderRadius:8,padding:"10px 12px",marginBottom:8}}>
-        <div style={{fontSize:12.5,color:C.text,lineHeight:1.45}}>{a.message}</div>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:6}}>
-          <span style={{fontSize:11,color:C.dim}}>{a.date} · {fmtT(a.fired_at)} ET</span>
-          <div style={{display:"flex",gap:6}}>
-            <Btn outline color={C.green} onClick={()=>resolve(a.id,"acked")} style={{padding:"3px 10px",fontSize:11}}>✓ Ack</Btn>
-            <Btn outline color={C.muted} onClick={()=>{if(confirm("Ignore this alert? It won't fire again today for this subject (kept on record as ignored)."))resolve(a.id,"ignored");}} style={{padding:"3px 10px",fontSize:11}}>✕ Ignore</Btn>
-          </div>
-        </div>
-      </div>)}
-      <div style={{fontSize:11,color:C.dim,marginTop:4}}><b>Ack</b> = handled for now — if the problem persists, it re-alerts after the rule's cooldown. <b>Ignore</b> = silenced for the rest of the day, kept on record. Thresholds: Configuration → Notifications.</div>
     </div>}
-    <div style={{position:"fixed",right:16,bottom:16,zIndex:310,display:"flex",flexDirection:"column",gap:8,maxWidth:380}}>
-      {toasts.map(t=><div key={t.id} onClick={()=>{setToasts(x=>x.filter(y=>y.id!==t.id));setOpen(true);}} style={{cursor:"pointer",background:C.surface,border:`1px solid ${sevColor(t.severity)}`,borderLeft:`4px solid ${sevColor(t.severity)}`,borderRadius:10,padding:"10px 14px",boxShadow:"0 8px 30px rgba(0,0,0,0.35)",fontSize:12.5,color:C.text,lineHeight:1.45}}>
-        <b style={{color:sevColor(t.severity)}}>⚠ Alert</b> — {t.message}
-      </div>)}
-    </div>
-  </>;
+  </div>;
 }
+
+
 export default function App() {
   // Load Google Identity Services for Gmail OAuth
   // Background syncing runs server-side on a Supabase Cron schedule
@@ -15404,6 +20093,14 @@ export default function App() {
     }catch(e){console.error(e);setMyRole("staff");}})();
   },[user]);
   useEffect(()=>{if(myRole&&myRole!=="agent")loadData();},[loadData,myRole]);
+  useEffect(()=>{
+    if(!myRole||myRole==="agent")return;
+    sb("GET","crm_meta?select=key,value").then(rows=>{(rows||[]).forEach(r=>{
+      if(r.key==="portal_id")CRM_META.portalId=r.value;
+      else if(r.key==="ui_domain")CRM_META.uiDomain=r.value||CRM_META.uiDomain;
+      else if(r.key.startsWith("type:"))CRM_META.types[r.key.slice(5)]=r.value;
+    });}).catch(()=>{});
+  },[myRole]);
   // nav persists in localStorage across logins on the same browser — never
   // land a role-scoped user on a page their role can't see
   useEffect(()=>{if(myRole&&NAV_BY_ROLE[myRole]&&!NAV_BY_ROLE[myRole].includes(nav)&&!["cashflow","perfreport","dispos","pingbids","integrations","team","agents","hr"].includes(nav))goNav("dashboard");},[myRole,nav]);
@@ -15426,6 +20123,7 @@ export default function App() {
   },[token,myRole,loadData]);
   function signOut(){sessionStorage.removeItem("nyala_session");setUser(null);setToken(null);}
   const [showPwModal,setShowPwModal]=useState(false);
+  const [showNotifPrefs,setShowNotifPrefs]=useState(false);
   const [pwForm,setPwForm]=useState({newPassword:"",confirm:""});
   const [pwSaving,setPwSaving]=useState(false);
   const [pwError,setPwError]=useState("");
@@ -15451,8 +20149,9 @@ export default function App() {
   if(myRole===null) return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:C.bg,color:C.sub,fontFamily:"'Inter',system-ui,sans-serif"}}>Loading…</div>;
   if(myRole==="agent") return <AgentWorkspace user={user} onSignOut={signOut}/>;
   const navItems=[
-    {id:"dashboard",label:"Overview",icon:"◈"},{id:"sotu",label:"State of the Union",icon:"▥"},{id:"projections",label:"Projections",icon:"↗"},
+    {id:"dashboard",label:"Overview",icon:"◈"},{id:"sotu",label:"State of the Union",icon:"▥"},{id:"alerts",label:"Alerts",icon:"🔔"},{id:"projections",label:"Projections",icon:"↗"},
     {id:"actuals",label:"Actuals",icon:"⊞"},{id:"analysis",label:"Analysis",icon:"⇄"},
+    {id:"pricing",label:"Pricing",icon:"％"},
     {id:"billing",label:"Billing",icon:"$"},
     {id:"clientreports",label:"External Reports",icon:"▤"},
     {id:"creative",label:"Creative Labs",icon:"✦"},
@@ -15473,7 +20172,6 @@ export default function App() {
       </nav>
       <div style={{padding:"12px 12px 20px",borderTop:`1px solid ${C.border}`}}>
         <div style={{fontSize:11,color:C.sub,marginBottom:8,overflow:"hidden",textOverflow:"ellipsis"}}>{user.email}</div>
-        <AlertBell user={user}/>
         <button onClick={()=>loadData()} disabled={loading} style={{width:"100%",background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.sub,cursor:loading?"wait":"pointer",fontSize:12,padding:"7px",marginBottom:8}}>
           {loading?"Refreshing…":`↻ Refresh Data${dataAt?" · "+dataAt.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"}):""}`}
         </button>
@@ -15483,21 +20181,30 @@ export default function App() {
         <button onClick={()=>{setPwForm({newPassword:"",confirm:""});setPwError("");setShowPwModal(true);}} style={{width:"100%",background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.sub,cursor:"pointer",fontSize:12,padding:"7px",marginBottom:8}}>
           🔑 Change Password
         </button>
+        <button onClick={()=>setShowNotifPrefs(true)} style={{width:"100%",background:"none",border:`1px solid ${C.border}`,borderRadius:6,color:C.sub,cursor:"pointer",fontSize:12,padding:"7px",marginBottom:8}}>
+          🔔 Notifications
+        </button>
         <Btn onClick={signOut} outline color={C.muted} style={{width:"100%",fontSize:12}}>Sign Out</Btn>
       </div>
     </div>
     <div style={{flex:1,overflow:"auto",display:"flex",flexDirection:"column"}}>
       <GlobalFilters data={data} filters={globalFilters} onChange={setGlobalFilters} onClear={()=>setGlobalFilters({client:"All",publisher:"All",vertical:"All",lead_type:"All",duration:"All"})}/>
+      {FEATURES.askClaude&&<AskClaude/>}
       <div style={{flex:1,overflow:"auto"}}>
       <div style={{maxWidth:"100%",padding:"20px 28px"}}>
         {loading&&<div style={{color:C.sub,marginBottom:16,fontSize:13}}>Loading…</div>}
         {!loading&&callsLoading&&<div style={{color:C.dim,marginBottom:16,fontSize:12}}>Loading call history in the background — call-based numbers fill in shortly…</div>}
         <ErrorBoundary key={nav}>
         {nav==="dashboard"&&<Dashboard data={data}/>}
-        {nav==="sotu"&&<StateOfUnion data={data}/>}
+        {nav==="sotu"&&<StateOfUnion data={data} user={user}/>}
+        {nav==="alerts"&&<AlertsPage user={user} data={data} onViewCalls={(side,name)=>{
+          try{localStorage.setItem("ci_jump",JSON.stringify({side,name,t:Date.now()}));}catch(e){}
+          setAnalysisModule("callintel");goNav("analysis");
+        }}/>}
         {nav==="creative"&&<CreativeLabs user={user}/>}
         {nav==="projections"&&<Projections clientCampaigns={data.clientCampaigns} publisherCampaigns={data.publisherCampaigns} campaignLinks={data.campaignLinks} settings={settings} onSaveSettings={saveSettings} tvCampaigns={data.tvCampaigns||[]} tvCampaignClients={data.tvCampaignClients||[]} tvCampaignNetworks={data.tvCampaignNetworks||[]} tvBookings={data.tvBookings||[]} callgridCalls={data.callgridCalls||[]} clientCampaignRates={data.clientCampaignRates||[]} pubCampaignRates={data.pubCampaignRates||[]} arRows={data.arRows||[]} apRows={data.apRows||[]}/>}
         {nav==="actuals"&&<Actuals actuals={data.actuals} pubActuals={data.pubActuals} callgridCalls={data.callgridCalls} clients={data.clients} publishers={data.publishers} clientCampaigns={filterByGlobal(data.clientCampaigns)} publisherCampaigns={filterByGlobal(data.publisherCampaigns,false)} campaignLinks={data.campaignLinks} onRefresh={loadData} callgridConfig={callgridConfig} onSaveCallGridConfig={saveCallGridConfig} globalFilters={globalFilters} tvBookings={data.tvBookings||[]} tvCampaigns={data.tvCampaigns||[]} tvCreatives={data.tvCreatives||[]} networks={data.networks||[]}/>}
+        {nav==="pricing"&&<PricingView clients={data.clients||[]} publishers={data.publishers||[]} clientCampaigns={data.clientCampaigns||[]} publisherCampaigns={data.publisherCampaigns||[]} campaignLinks={data.campaignLinks||[]} callgridCalls={data.callgridCalls||[]}/>}
         {nav==="analysis"&&(()=>{
           const allowed=NAV_BY_ROLE[myRole]&&ANALYSIS_MODS_BY_ROLE[myRole]
             ?ANALYSIS_MODULES.filter(m=>ANALYSIS_MODS_BY_ROLE[myRole].includes(m.id))
@@ -15512,6 +20219,7 @@ export default function App() {
             {mod==="cashflow"&&<CashFlow clients={data.clients||[]} publishers={data.publishers||[]} clientCampaigns={data.clientCampaigns||[]} publisherCampaigns={data.publisherCampaigns||[]} callgridCalls={data.callgridCalls||[]}/>}
             {mod==="perfreport"&&<PerfReport clients={data.clients||[]} publishers={data.publishers||[]} clientCampaigns={data.clientCampaigns||[]} publisherCampaigns={data.publisherCampaigns||[]} callgridCalls={data.callgridCalls||[]} dailyTotals={data.dailyTotals||[]} dailyTotalsPub={data.dailyTotalsPub||[]} onRefresh={loadData}/>}
             {mod==="dispos"&&<Dispositions clients={data.clients||[]} callgridCalls={data.callgridCalls||[]} user={user}/>}
+            {mod==="callintel"&&<CallIntel data={data}/>}
             {mod==="pingbids"&&<PingsBids/>}
           </div>;
         })()}
@@ -15552,6 +20260,7 @@ export default function App() {
       </div>
       </div>
     </div>
+    {showNotifPrefs&&<NotificationPrefsModal email={user.email} onClose={()=>setShowNotifPrefs(false)}/>}
     {showPwModal&&<Modal title="Change Password" onClose={()=>setShowPwModal(false)}>
       <Field label="New Password">
         <Input type="password" value={pwForm.newPassword} onChange={e=>setPwForm({...pwForm,newPassword:e.target.value})} placeholder="At least 8 characters"/>
